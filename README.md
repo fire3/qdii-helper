@@ -14,13 +14,16 @@ QDII 基金限购额度查询工具。
 | 路径 | 内容 |
 |---|---|
 | [`docs/api.md`](docs/api.md) | **接口文档** —— 天天基金/东方财富限购相关接口的逆向调研结果，全部实测验证 |
-| [`docs/design.md`](docs/design.md) | **设计文档** —— 查询工具的数据源选型、数据模型、归一化算法、CLI 设计、演进路线 |
-| [`src/qdii_limit.py`](src/qdii_limit.py) | 参考实现（P0，仅标准库） |
-| [`tests/test_normalize.py`](tests/test_normalize.py) | 归一化规则回归测试 |
+| [`docs/design.md`](docs/design.md) | **设计文档** —— 数据源选型、数据模型、归一化算法、归类设计、CLI/Web 设计、演进路线 |
+| [`src/qdii_limit.py`](src/qdii_limit.py) | P0：命令行工具（仅标准库） |
+| [`src/qdii_categories.py`](src/qdii_categories.py) | 归类规则（地区/市场 × 主题 两个维度） |
+| [`src/qdii_web.py`](src/qdii_web.py) | P1：Web 工具后端（仅标准库，复用上述两个模块） |
+| [`web/`](web/) | P1：零依赖前端（HTML + CSS + JS，无构建步骤） |
+| [`tests/`](tests/) | 归一化规则 + 前端查询逻辑测试 |
 
 ---
 
-## 快速开始
+## 一、命令行工具
 
 无需安装任何依赖，Python 3.8+：
 
@@ -44,10 +47,53 @@ python3 src/qdii_limit.py premium --n 30
 python3 src/qdii_limit.py list --status 全部 --format json
 ```
 
-运行测试：
+## 二、Web 工具
 
 ```bash
-python3 tests/test_normalize.py
+python3 src/qdii_web.py                 # http://127.0.0.1:8765
+python3 src/qdii_web.py --port 9000     # 换端口
+python3 src/qdii_web.py --host 0.0.0.0  # 局域网可访问
+```
+
+首次打开会拉取上游数据（约 4 MB），之后 30 分钟走缓存。
+
+### 功能
+
+- **双维度归类**：24 个「地区/市场」× 14 个「主题」，735 只全部覆盖，无未分类残留
+  - 地区：纳斯达克100、标普500、恒生科技、恒生医药、中概互联、日本、德国、越南、印度…
+  - 主题：半导体、医药生物、科技互联网、能源、贵金属/商品、债券、红利/国企…
+  - 两个维度各自多选，**维内取并集、维度间取交集** —— 直接回答
+    「美国的、医药生物的 QDII 还有多少能买？」
+- **额度筛选**：≤10 元 / ≤100 元 / ≤1000 元 / ≤1 万 / ≤100 万 / 不限
+- **状态筛选**：可买 / 限大额 / 开放申购 / 暂停申购 / 场内交易 / 全部
+- **搜索**：基金代码或名称
+- **排序**：额度从紧到松 / 从松到紧 / 可买优先 / 按名称
+- **详情抽屉**：点击任意基金，聚合实时详情与限购公告
+- **场内折溢价**：85 只场内 QDII 的溢价率排行
+- **查询可分享**：筛选条件写入 URL hash，复制链接即可复现同一查询
+- 深色模式、响应式；`/` 聚焦搜索框，`Esc` 关闭抽屉
+
+### 归类示例
+
+以下数字均为实测（数据日期 2026-09-14）：
+
+```
+默认视图 = 人民币份额 + 可买                        → 419 只
+点「纳斯达克100」                                   → 31 只（含 270042，日限额 2 元）
+点「纳斯达克100」+「限额 ≤100 元」                  → 29 只
+点「限额 ≤10 元」                                   → 50 只
+点「恒生科技」                                      → 46 只
+状态改为「全部」+「美国」+「医药生物」               → 5 只（标普生物科技类）
+```
+
+## 测试
+
+```bash
+python3 tests/test_normalize.py                              # 17 项，归一化规则
+
+# 前端查询逻辑（需要服务在跑）
+curl -s http://127.0.0.1:8765/api/dataset > /tmp/dataset.json
+node tests/test_web_logic.mjs /tmp/dataset.json               # 31 项
 ```
 
 ---

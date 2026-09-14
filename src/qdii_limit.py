@@ -154,15 +154,21 @@ def http_get(url: str, referer: str = "https://fund.eastmoney.com/", timeout: in
         raise UpstreamError(f"请求失败 {url}: {exc}") from exc
 
 
-def fetch_purchase_snapshot(use_cache: bool = True) -> list[list[str]]:
-    """接口 A：全市场基金申购状态。"""
+def fetch_purchase_snapshot(use_cache: bool = True) -> tuple[list[list[str]], dict]:
+    """接口 A：全市场基金申购状态。
+
+    返回 (rows, meta)。meta 含 record / pages / showday（showday[0] 为数据日期）。
+    """
     CACHE_DIR.mkdir(exist_ok=True)
     cache = CACHE_DIR / "sgzt.json"
 
     if use_cache and cache.exists() and time.time() - cache.stat().st_mtime < CACHE_TTL:
         try:
-            return json.loads(cache.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+            if isinstance(cached, list):
+                return cached, {}                      # 旧版缓存格式
+            return cached["rows"], cached.get("meta", {})
+        except (json.JSONDecodeError, OSError, KeyError, TypeError):
             pass
 
     params = urllib.parse.urlencode(
@@ -181,8 +187,16 @@ def fetch_purchase_snapshot(use_cache: bool = True) -> list[list[str]]:
     if not rows or len(rows[0]) != 13:
         raise UpstreamError(f"申购状态列数异常：期望 13，实际 {len(rows[0]) if rows else 0}")
 
-    cache.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
-    return rows
+    raw_meta = dict(re.findall(r'(\w+):("[^"]*"|\[[^\]]*\])', text[text.index("record:"):]))
+    meta = {k: v.strip('"') for k, v in raw_meta.items() if not v.startswith("[")}
+    try:
+        meta["showday"] = json.loads(raw_meta.get("showday", "[]"))
+    except json.JSONDecodeError:
+        meta["showday"] = []
+
+    cache.write_text(json.dumps({"rows": rows, "meta": meta}, ensure_ascii=False),
+                     encoding="utf-8")
+    return rows, meta
 
 
 def fetch_fund_detail(code: str) -> dict:
@@ -301,12 +315,20 @@ def build_fund(row: list[str]) -> FundLimit:
 
 
 def load_qdii(use_cache: bool = True) -> list[FundLimit]:
-    funds = [build_fund(r) for r in fetch_purchase_snapshot(use_cache=use_cache)]
+    rows, _ = fetch_purchase_snapshot(use_cache=use_cache)
+    funds = [build_fund(r) for r in rows]
     qdii = [f for f in funds if is_qdii(f.fund_type)]
     if len(qdii) < 500:
         print(f"警告：QDII 仅匹配到 {len(qdii)} 只，可能上游基金类型标签已变更",
               file=sys.stderr)
     return qdii
+
+
+def load_qdii_with_meta(use_cache: bool = True) -> tuple[list[FundLimit], dict]:
+    """Web 端使用：同时拿到基金列表与数据日期等元信息。"""
+    rows, meta = fetch_purchase_snapshot(use_cache=use_cache)
+    funds = [build_fund(r) for r in rows]
+    return [f for f in funds if is_qdii(f.fund_type)], meta
 
 
 # --------------------------------------------------------------------------

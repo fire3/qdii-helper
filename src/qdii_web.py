@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""QDII 基金限购额度查询 —— Web 工具后端。
+
+复用 `qdii_limit.py` 的全部归一化逻辑与 `qdii_categories.py` 的归类规则，
+不自建第二套数据口径。
+
+仅依赖 Python 标准库：
+    python3 src/qdii_web.py            # 默认 http://127.0.0.1:8765
+    python3 src/qdii_web.py --port 9000 --host 0.0.0.0
+"""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import json
+import mimetypes
+import sys
+import threading
+import time
+from collections import Counter
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import qdii_categories as cats          # noqa: E402
+import qdii_limit as ql                 # noqa: E402
+
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+DISCLAIMER = "数据来自天天基金公开接口，仅供参考，实际限额以基金公司最新公告为准"
+
+
+# --------------------------------------------------------------------------
+# 数据集（进程内缓存，与 qdii_limit 的文件缓存 TTL 对齐）
+# --------------------------------------------------------------------------
+
+class Dataset:
+    """构建并缓存面向 Web 的基金数据集。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._payload: dict | None = None
+        self._built_at: float = 0.0
+        self._ttl = ql.CACHE_TTL
+
+    def get(self, force: bool = False) -> dict:
+        with self._lock:
+            fresh = self._payload is not None and time.time() - self._built_at < self._ttl
+            if fresh and not force:
+                return self._payload
+            self._payload = self._build(force)
+            self._built_at = time.time()
+            return self._payload
+
+    def _build(self, force: bool) -> dict:
+        funds, meta = ql.load_qdii_with_meta(use_cache=not force)
+
+        records = []
+        for f in funds:
+            region, theme = cats.classify(f.name)
+            records.append({
+                "code": f.code,
+                "name": f.name,
+                "type": f.fund_type,
+                "region": region,
+                "theme": theme,
+                "currency": f.currency.value,
+                "status": f.status.value,
+                "limit": f.daily_limit,          # None = 无限额
+                "limit_text": f.limit_display,
+                "min_purchase_text": f.min_purchase_display,
+                "next_open_date": f.next_open_date,
+                "redeem_status": f.redeem_status.value,
+                "nav": f.nav,
+                "nav_date": f.nav_date,
+                "fee": f.fee,
+                "on_exchange": f.is_on_exchange,
+                "buyable": f.is_buyable,
+            })
+
+        cny = [r for r in records if r["currency"] == "CNY"]
+        status_counts = Counter(r["status"] for r in records)
+
+        return {
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "data_date": (meta.get("showday") or [None])[0],
+            "total": len(records),
+            "stats": {
+                "status": dict(status_counts),
+                "buyable": sum(1 for r in records if r["buyable"]),
+                # 限购档位分布只统计人民币份额，避免美元/港币份额污染
+                "limit_bands": _limit_bands(cny),
+                # 「最紧」取最小的**正数**限额：限大额里存在真实的 0 元档，
+                # 但 0 元不传达有效信息
+                "tightest": min(
+                    (r["limit"] for r in cny
+                     if r["status"] == "限大额" and r["limit"]),
+                    default=None,
+                ),
+            },
+            "categories": {
+                "regions": _ordered_counts(records, "region", cats.FEATURED_REGIONS),
+                "themes": _ordered_counts(records, "theme", cats.FEATURED_THEMES),
+            },
+            "funds": records,
+            "disclaimer": DISCLAIMER,
+        }
+
+
+def _ordered_counts(records: list[dict], key: str, featured: list[str]) -> list[dict]:
+    """分类计数，featured 中的按预设顺序置前，其余按数量降序。"""
+    counts = Counter(r[key] for r in records)
+    ordered = [k for k in featured if k in counts]
+    ordered += [k for k, _ in counts.most_common() if k not in ordered]
+    return [{"name": k, "count": counts[k]} for k in ordered]
+
+
+LIMIT_BANDS = [
+    ("限 10 元以内", 0, 10),
+    ("限 100 元以内", 10.01, 100),
+    ("限 1000 元以内", 100.01, 1000),
+    ("限 1 万元以内", 1000.01, 10000),
+    ("限 100 万元以内", 10000.01, 1000000),
+    ("限 100 万元以上", 1000000.01, float("inf")),
+]
+
+
+def _limit_bands(records: list[dict]) -> list[dict]:
+    limited = [r["limit"] for r in records
+               if r["status"] == "限大额" and r["limit"] is not None]
+    out = []
+    for label, low, high in LIMIT_BANDS:
+        n = sum(1 for v in limited if low <= v <= high)
+        if n:
+            out.append({"name": label, "count": n, "low": low,
+                        "high": None if high == float("inf") else high})
+    return out
+
+
+DATASET = Dataset()
+
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+
+def _fund_detail(code: str) -> dict:
+    """接口 B 详情 + 接口 D 限购公告，聚合为单只基金的详情。"""
+    out: dict = {"code": code, "notices": [], "errors": []}
+    try:
+        d = ql.fetch_fund_detail(code)
+        out["detail"] = {
+            "name": d.get("SHORTNAME"),
+            "type": d.get("FTYPE"),
+            "company": d.get("JJGS"),
+            "manager": d.get("JJJL"),
+            "purchase_status": d.get("SGZT"),
+            "redeem_status": d.get("SHZT"),
+            "max_purchase": d.get("MAXSG"),
+            "min_purchase": d.get("MINSG"),
+            "nav": d.get("DWJZ"),
+            "nav_date": d.get("FSRQ"),
+            "next_open_date": d.get("DUEDATE"),
+            "source_rate": d.get("SOURCERATE"),
+            "rate": d.get("RATE"),
+            "risk_level": d.get("RISKLEVEL"),
+        }
+    except ql.UpstreamError as exc:
+        out["errors"].append(f"详情接口不可用：{exc}")
+
+    try:
+        for item in ql.fetch_limit_notices(code, size=8):
+            out["notices"].append({
+                "date": item.get("PUBLISHDATEDesc"),
+                "title": item.get("TITLE"),
+                "id": item.get("ID"),
+            })
+    except ql.UpstreamError as exc:
+        out["errors"].append(f"公告接口不可用：{exc}")
+    return out
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "qdii-helper"
+
+    def log_message(self, fmt: str, *args) -> None:      # 静音默认访问日志
+        if self.server.verbose:                          # type: ignore[attr-defined]
+            super().log_message(fmt, *args)
+
+    # ---- 响应助手 ----
+
+    def _send(self, status: int, body: bytes, content_type: str) -> None:
+        headers = [("Content-Type", content_type), ("Cache-Control", "no-store")]
+        # 数据集约 300 KB，gzip 后可降到 ~40 KB
+        if len(body) > 1024 and "gzip" in self.headers.get("Accept-Encoding", ""):
+            body = gzip.compress(body, 6)
+            headers.append(("Content-Encoding", "gzip"))
+        self.send_response(status)
+        for key, value in headers:
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, payload, status: int = HTTPStatus.OK) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._send(status, body, "application/json; charset=utf-8")
+
+    def _error(self, status: int, message: str) -> None:
+        self._json({"error": message}, status)
+
+    # ---- 路由 ----
+
+    def do_GET(self) -> None:                            # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
+        try:
+            if path == "/api/dataset":
+                force = query.get("refresh", ["0"])[0] == "1"
+                self._json(DATASET.get(force=force))
+            elif path == "/api/fund":
+                code = (query.get("code") or [""])[0].strip()
+                if not code.isdigit() or len(code) != 6:
+                    self._error(HTTPStatus.BAD_REQUEST, "code 必须是 6 位数字")
+                else:
+                    self._json(_fund_detail(code))
+            elif path == "/api/premium":
+                self._json(self._premium())
+            else:
+                self._static(path)
+        except ql.UpstreamError as exc:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE, f"上游接口不可用：{exc}")
+        except BrokenPipeError:
+            pass
+        except Exception as exc:                         # noqa: BLE001
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"服务内部错误：{exc}")
+
+    def _premium(self) -> dict:
+        data = DATASET.get()
+        codes = [r["code"] for r in data["funds"] if r["on_exchange"]]
+        rates = ql.fetch_exchange_premium(codes)
+        items = []
+        for r in data["funds"]:
+            if r["code"] in rates and rates[r["code"]] is not None:
+                items.append({"code": r["code"], "name": r["name"],
+                              "discount": rates[r["code"]]})
+        items.sort(key=lambda x: x["discount"])
+        return {"items": items, "disclaimer": DISCLAIMER}
+
+    def _static(self, path: str) -> None:
+        rel = "index.html" if path in ("/", "") else path.lstrip("/")
+        target = (WEB_DIR / rel).resolve()
+        if not str(target).startswith(str(WEB_DIR)) or not target.is_file():
+            self._error(HTTPStatus.NOT_FOUND, f"未找到 {path}")
+            return
+        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if ctype.startswith("text/") or ctype in ("application/javascript",):
+            ctype += "; charset=utf-8"
+        self._send(HTTPStatus.OK, target.read_bytes(), ctype)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="QDII 基金限购额度查询 Web 工具")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--verbose", action="store_true", help="打印访问日志")
+    args = parser.parse_args(argv)
+
+    if not WEB_DIR.is_dir():
+        print(f"错误：前端目录不存在 {WEB_DIR}", file=sys.stderr)
+        return 1
+
+    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    httpd.verbose = args.verbose            # type: ignore[attr-defined]
+    print(f"QDII 限购查询 Web 工具已启动： http://{args.host}:{args.port}")
+    print("首次加载会拉取上游数据（约 4 MB），之后 30 分钟内走缓存。Ctrl+C 停止。")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止。")
+    finally:
+        httpd.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

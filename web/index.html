@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QDII 基金限购额度查询</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <h1>QDII 基金限购额度查询</h1>
+      <p class="meta">
+        <span id="data-date">加载中…</span>
+        <span class="dot">·</span>
+        <span id="total-count">—</span>
+        <span class="dot">·</span>
+        <span id="generated-at"></span>
+      </p>
+    </div>
+    <div class="topbar-actions">
+      <button id="refresh" class="btn" title="强制从上游重新拉取（跳过缓存）">刷新数据</button>
+      <button id="theme-toggle" class="btn btn-icon" title="切换深色模式" aria-label="切换深色模式">◐</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="stats" id="stats"></section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>筛选</h2>
+      <button id="clear-filters" class="btn btn-sm">清空筛选</button>
+    </div>
+
+    <div class="field">
+      <label>搜索</label>
+      <input id="search" type="search" placeholder="输入基金代码或名称，如 270042 / 纳斯达克 / 恒生科技">
+    </div>
+
+    <div class="field">
+      <label>状态</label>
+      <div class="chips" id="status-chips"></div>
+    </div>
+
+    <div class="field">
+      <label>日限额上限</label>
+      <div class="chips" id="limit-chips"></div>
+    </div>
+
+    <div class="field">
+      <label>申购币种</label>
+      <div class="chips" id="currency-chips"></div>
+    </div>
+
+    <div class="field">
+      <label>地区 / 市场 <span class="hint">点击可多选</span></label>
+      <div class="chips" id="region-chips"></div>
+    </div>
+
+    <div class="field">
+      <label>主题</label>
+      <div class="chips" id="theme-chips"></div>
+    </div>
+
+    <div class="field">
+      <label>排序</label>
+      <div class="chips" id="sort-chips"></div>
+    </div>
+  </section>
+
+  <section class="results">
+    <div class="results-head">
+      <h2 id="result-title">结果</h2>
+      <nav class="tabs" id="tabs">
+        <button class="tab is-active" data-tab="funds">基金列表</button>
+        <button class="tab" data-tab="premium">场内折溢价</button>
+      </nav>
+    </div>
+
+    <div id="active-filters" class="active-filters"></div>
+
+    <div id="table-host" class="table-host"></div>
+    <div id="premium-host" class="table-host" hidden></div>
+  </section>
+
+  <footer class="foot">
+    <p id="disclaimer"></p>
+    <p class="src">数据源：天天基金 / 东方财富公开接口（非官方，请勿高频请求）</p>
+  </footer>
+</main>
+
+<aside id="drawer" class="drawer" hidden>
+  <div class="drawer-backdrop" data-close></div>
+  <div class="drawer-panel">
+    <button class="drawer-close" data-close aria-label="关闭">×</button>
+    <div id="drawer-body"></div>
+  </div>
+</aside>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
