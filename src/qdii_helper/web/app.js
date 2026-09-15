@@ -561,6 +561,157 @@ function holdingsSection(holdings, reportDate) {
   return parts.join('');
 }
 
+/* ---------------- 详情：购买建议 ---------------- */
+
+// 份额类别字母（A/C/D/E/I/F…）长在简称末尾。
+// 「天弘恒生科技ETF」这类以 ETF 结尾的名字是场内份额、类别字母，必须排除。
+function shareClass(name) {
+  if (!name || /(ETF|LOF|FOF|REITs)$/.test(name)) return null;
+  const m = String(name).match(/([A-Z])$/);
+  return m ? m[1] : null;
+}
+
+// 同一只基金的另一类份额（A↔C）。币种、渠道都写在简称里，直接按名字配。
+function siblingShare(fund, funds) {
+  const cls = shareClass(fund.name);
+  const other = cls === 'A' ? 'C' : cls === 'C' ? 'A' : null;
+  if (!other) return null;
+  const base = fund.name.slice(0, -1);
+  return (funds || []).find((r) => r.name === base + other) || null;
+}
+
+const feePct = (s) => {
+  const v = parseFloat(s);
+  return Number.isFinite(v) ? v : null;
+};
+
+const fmtFee = (v) => (isBlank(v) ? '—' : `${Number(v).toFixed(2)}%`);
+
+// C 类销售服务费的常见区间（年率）。数据源没有这个字段，只能按区间估算；
+// 平衡点 = A 类一次性申购费 ÷ C 类年销售服务费。费用越低、平衡点越晚。
+const SERVICE_FEE_LOW = 0.2;
+const SERVICE_FEE_HIGH = 0.4;
+
+function breakevenRange(loadFee) {
+  if (loadFee === null || loadFee <= 0) return null;
+  return [(loadFee / SERVICE_FEE_HIGH) * 12, (loadFee / SERVICE_FEE_LOW) * 12];
+}
+
+// 区间的两个端点统一用一个单位，避免出现「3.9 个月～7.8 个月」这种重复
+function fmtBreakeven(range) {
+  if (!range) return null;
+  const [early, late] = range;
+  return late >= 24
+    ? `${(early / 12).toFixed(1)}～${(late / 12).toFixed(1)} 年`
+    : `${early.toFixed(1)}～${late.toFixed(1)} 个月`;
+}
+
+/** 生成购买建议条目。纯函数，便于回归测试。 */
+function buyAdvice(fund, detail, funds) {
+  if (!fund) return [];
+  const items = [];
+  const cls = shareClass(fund.name);
+  const sib = siblingShare(fund, funds);
+  const ownFee = feePct(fund.fee);
+  const liveRate = detail ? feePct(detail.rate) : null;
+  const sourceRate = detail ? feePct(detail.source_rate) : null;
+  // A 类的一次性申购费：优先用接口 B 的折后费率，退回列表里的手续费列。
+  // C 类自己免申购费，要拿同基金 A 类的费率才能算平衡点。
+  const loadFee = cls === 'A' ? (liveRate ?? ownFee) : (sib ? feePct(sib.fee) : null);
+  const breakeven = fmtBreakeven(breakevenRange(loadFee));
+
+  if (cls === 'A') {
+    const discounted = liveRate !== null && sourceRate !== null && sourceRate > liveRate;
+    // 没取到费率时说「按平台费率」，别在句子里留一个破折号
+    const feeClause = loadFee === null
+      ? 'A 类收<b>一次性申购费</b>'
+      : `A 类收<b>一次性申购费</b> ${fmtFee(loadFee)}`;
+    items.push({
+      level: 'info',
+      text: `${feeClause}${discounted ? `（原价 ${fmtFee(sourceRate)}）` : ''}，不收销售服务费；` +
+        (breakeven
+          ? `持有时长超过平衡点（约 <b>${breakeven}</b>）选 A 更划算`
+          : '适合长期持有'),
+    });
+  } else if (cls === 'C') {
+    items.push({
+      level: 'info',
+      text: 'C 类<b>免申购费</b>，但按日计提销售服务费（从净值里扣）；' +
+        (breakeven
+          ? `持有时长在平衡点（约 <b>${breakeven}</b>）以内选 C 更划算`
+          : '更适合短期持有'),
+    });
+  } else if (cls) {
+    items.push({
+      level: 'info',
+      text: `${esc(cls)} 类份额，各渠道费率规则不统一，以招募说明书为准。`,
+    });
+  }
+
+  if (sib) {
+    // 暂停申购时 limit_text 与 status 是同一个词，别写成「暂停申购 · 暂停申购」
+    const sibInfo = sib.limit_text === sib.status
+      ? sib.status
+      : `${sib.limit_text} · ${sib.status}`;
+    items.push({
+      level: sib.buyable ? 'info' : 'warn',
+      text: `同一只基金还有 <b>${esc(cls === 'A' ? 'C' : 'A')} 类</b>份额：${esc(sibInfo)}`,
+      goto: sib,
+    });
+  }
+
+  // 限额建议只对买得到的基金说，且要区分「限 0 元」这种买不进的情况
+  if (fund.buyable && fund.limit !== null) {
+    if (fund.limit <= 0) {
+      items.push({
+        level: 'danger',
+        text: '日限额为 <b>0 元</b>，实际等于买不进去（限大额但未公告暂停）；' +
+          '留意最新公告，或看同标的场内 ETF。',
+      });
+    } else if (fund.limit <= 100) {
+      items.push({
+        level: 'warn',
+        text: `日限额仅 ${esc(fund.limit_text)}，大额买入要分多日；也可看同标的场内 ETF，但要留意溢价。`,
+      });
+    }
+  }
+
+  if (fund.buyable && !fund.on_exchange) {
+    items.push({
+      level: 'warn',
+      text: '场外份额持有不满 7 天，赎回费不低于 <b>1.5%</b> 且全额计入基金资产；' +
+        'QDII 确认与到账本就慢，不适合短线。',
+    });
+  }
+
+  if (fund.buyable && fund.limit === null && fund.status === '开放申购') {
+    items.push({ level: 'ok', text: '当前开放申购，且没有单日限额。' });
+  }
+  if (fund.status === '暂停申购') {
+    items.push({ level: 'danger', text: '当前<b>暂停申购</b>，买不进去；可留意下一开放日或场内替代。' });
+  } else if (fund.on_exchange) {
+    items.push({
+      level: 'info',
+      text: '场内份额，买入前先看「场内折溢价」标签页，溢价高时别追。',
+    });
+  }
+
+  return items;
+}
+
+function adviceSection(fund, detail, funds) {
+  const items = buyAdvice(fund, detail, funds);
+  if (!items.length) return '';
+  const lis = items.map((it) => `<li class="${it.level}">${it.text}${
+    it.goto ? ` <button class="link" data-goto="${esc(it.goto.code)}">查看 ${esc(it.goto.code)}</button>` : ''
+  }</li>`).join('');
+  return `<div class="advice">
+    <h4>购买建议</h4>
+    <ul>${lis}</ul>
+    <p class="fine">平衡点 = A 类一次性申购费 ÷ C 类销售服务费，按 ${SERVICE_FEE_LOW}%～${SERVICE_FEE_HIGH}%/年 估算；实际费率以招募说明书为准。</p>
+  </div>`;
+}
+
 /* ---------------- 详情抽屉 ---------------- */
 
 async function openDrawer(code) {
@@ -594,6 +745,7 @@ async function openDrawer(code) {
   let sections = '';
   let errorNote = '';
   let navs = [];
+  let detailData = null;
 
   try {
     const res = await fetch(`/api/fund?code=${encodeURIComponent(code)}`);
@@ -601,6 +753,7 @@ async function openDrawer(code) {
 
     if (data.detail) {
       const d = data.detail;
+      detailData = d;
       detailBlock = `<div class="section-title">实时详情（接口 B）</div><dl class="kv">
         <dt>基金公司</dt><dd>${esc(d.company || '—')}</dd>
         <dt>基金经理</dt><dd>${esc(d.manager || '—')}</dd>
@@ -637,6 +790,7 @@ async function openDrawer(code) {
   body.innerHTML = `
     <h3>${esc(fund ? fund.name : code)}</h3>
     <p class="sub">${esc(code)}</p>
+    ${adviceSection(fund, detailData, dataset.funds)}
     ${kv(fund || { code })}
     ${sections}
     ${notices}
@@ -644,6 +798,9 @@ async function openDrawer(code) {
     ${errorNote}
     <div class="note" style="margin-top:16px">${esc(dataset.disclaimer)}</div>`;
 
+  body.querySelectorAll('[data-goto]').forEach((btn) => {
+    btn.addEventListener('click', () => openDrawer(btn.dataset.goto));
+  });
   initChart(body, navs);
 }
 

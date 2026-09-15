@@ -55,6 +55,7 @@ const source = readFileSync(new URL('../src/qdii_helper/web/app.js', import.meta
        visibleFunds, set, toggle, SORTERS, DEFAULT_STATE, readHash,
        PERIOD_LABELS, PERIOD_ORDER, sliceByDays, rangeStats, buildLinePath,
        fmtPct, fmtNum, trendClass,
+       buyAdvice, adviceSection, shareClass, siblingShare, breakevenRange, fmtBreakeven,
      };`;
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox);
@@ -255,6 +256,117 @@ check('数据集声明免责声明', typeof payload.disclaimer === 'string' && p
 check('分类计数与实际基金数一致',
   payload.categories.regions.reduce((s, c) => s + c.count, 0) === payload.total,
   `regions 合计 ${payload.categories.regions.reduce((s, c) => s + c.count, 0)} vs ${payload.total}`);
+
+/* ---------- 购买建议 ---------- */
+
+const byCode = (c) => payload.funds.find((f) => f.code === c);
+const fundA = byCode('270042');
+const fundC = byCode('006479');
+const adviceText = (items) => items.map((i) => i.text).join(' ');
+
+check('份额类别识别 A / C',
+  T.shareClass(fundA.name) === 'A' && T.shareClass(fundC.name) === 'C',
+  `${T.shareClass(fundA.name)} / ${T.shareClass(fundC.name)}`);
+check('以 ETF / LOF 结尾不算份额类别',
+  T.shareClass('天弘恒生科技ETF') === null && T.shareClass('某某LOF') === null);
+check('无类别字母的基金返回 null',
+  T.shareClass('华夏全球股票(QDII)(人民币)') === null);
+check('空名返回 null', T.shareClass('') === null && T.shareClass(undefined) === null);
+
+check('A 类能找到 C 类份额',
+  T.siblingShare(fundA, payload.funds)?.code === '006479');
+check('C 类能找到 A 类份额',
+  T.siblingShare(fundC, payload.funds)?.code === '270042');
+check('非 A/C 份额不配对', T.siblingShare(byCode('021778'), payload.funds) === null);
+
+/* 0.4% 一次性申购费 ÷ 0.4%/年 = 12 个月；服务费越低平衡点越晚 */
+const be = T.breakevenRange(0.4);
+check('平衡点用量纲正确', Math.abs(be[0] - 12) < 1e-9, `实际 ${be[0]}`);
+check('平衡点区间下界更早', be[0] < be[1]);
+check('申购费为 0 时无平衡点', T.breakevenRange(0) === null);
+check('申购费为 null 时无平衡点', T.breakevenRange(null) === null);
+
+const advA = T.buyAdvice(fundA, { rate: '0.13%', source_rate: '1.30%' }, payload.funds);
+const advC = T.buyAdvice(fundC, null, payload.funds);
+check('A 类建议写明一次性申购费', /一次性申购费/.test(adviceText(advA)));
+check('A 类建议用折后费率而非原价', /0\.13%/.test(adviceText(advA)));
+check('A 类建议带出原价', /原价 1\.30%/.test(adviceText(advA)));
+check('A 类建议给出平衡持有期',
+  /平衡点（约 <b>\d+(\.\d+)?～\d+(\.\d+)? 个月<\/b>）/.test(adviceText(advA)),
+  adviceText(advA));
+check('C 类建议写明免申购费', /免申购费/.test(adviceText(advC)));
+check('C 类建议用同基金 A 类费率算平衡点',
+  /平衡点（约 <b>\d+(\.\d+)?～\d+(\.\d+)? 个月<\/b>）/.test(adviceText(advC)),
+  adviceText(advC));
+check('A 类建议带出 C 类份额代码',
+  advA.some((i) => i.goto && i.goto.code === '006479'));
+check('C 类建议带出 A 类份额代码',
+  advC.some((i) => i.goto && i.goto.code === '270042'));
+
+/* 缺少接口 B 数据时退回到列表里的手续费列 */
+const advNoDetail = T.buyAdvice(fundA, null, payload.funds);
+check('无接口 B 数据时仍能给出平衡点',
+  /平衡点（约 <b>/.test(adviceText(advNoDetail)), adviceText(advNoDetail));
+check('平衡点超过两年时改用「年」',
+  /^\d+(\.\d+)?～\d+(\.\d+)? 年$/.test(T.fmtBreakeven(T.breakevenRange(1.3))),
+  T.fmtBreakeven(T.breakevenRange(1.3)));
+check('平衡点为空时返回 null', T.fmtBreakeven(null) === null);
+
+const suspended = payload.funds.find((f) => f.status === '暂停申购');
+check('暂停申购给出危险提示',
+  T.buyAdvice(suspended, null, payload.funds).some((i) => i.level === 'danger'));
+check('买不到的基金不再啰嗦 7 天赎回费',
+  !T.buyAdvice(suspended, null, payload.funds).some((i) => i.text.includes('不满 7 天')));
+check('场内交易提示看溢价',
+  T.buyAdvice(byCode('513100'), null, payload.funds).some((i) => i.text.includes('溢价')));
+check('限额 ≤100 元提示分多日买入',
+  T.buyAdvice(fundA, null, payload.funds).some((i) => i.text.includes('分多日')));
+check('可买的场外基金提示 7 天赎回费',
+  T.buyAdvice(fundA, null, payload.funds).some((i) => i.text.includes('不满 7 天')));
+check('场内基金不提示 7 天赎回费',
+  !T.buyAdvice(byCode('513100'), null, payload.funds).some((i) => i.text.includes('不满 7 天')));
+
+/* 限大额但限额为 0：买不进去，不能说「分多日」 */
+const zeroLimit = payload.funds.find((f) => f.buyable && f.limit === 0);
+check('存在限 0 元的基金（样本有效）', Boolean(zeroLimit), `实际 ${zeroLimit?.code}`);
+const zeroAdvice = T.buyAdvice(zeroLimit, null, payload.funds);
+check('限 0 元提示等于买不进去',
+  zeroAdvice.some((i) => i.level === 'danger' && i.text.includes('0 元')));
+check('限 0 元不再提示分多日',
+  !zeroAdvice.some((i) => i.text.includes('分多日')));
+
+/* 另一份额暂停申购时不该出现「暂停申购 · 暂停申购」 */
+const dupSib = payload.funds.filter((f) => f.code !== fundC.code)
+  .concat([{ ...fundC, status: '暂停申购', limit_text: '暂停申购' }]);
+check('另一份额暂停时不重复展示状态',
+  T.buyAdvice(fundA, null, dupSib).every((i) => !/(\S+) · \1/.test(i.text)),
+  adviceText(T.buyAdvice(fundA, null, dupSib)));
+
+/* 拿不到费率时不该在句子里留破折号 */
+const noFeeFund = { ...fundA, fee: '' };
+const noFeeAdvice = adviceText(T.buyAdvice(noFeeFund, null, [noFeeFund]));
+check('无费率时不给破折号',
+  !noFeeAdvice.includes('申购费 —') && noFeeAdvice.includes('一次性申购费'),
+  noFeeAdvice);
+
+/* 735 只全跑一遍：不该出现 undefined / NaN / 空建议 */
+const brokenAdvice = payload.funds.filter((f) => {
+  const t = adviceText(T.buyAdvice(f, null, payload.funds));
+  return /undefined|NaN|\[object/.test(t);
+});
+check('全部基金的建议都无 undefined / NaN',
+  brokenAdvice.length === 0,
+  `${brokenAdvice.length} 条：${brokenAdvice.slice(0, 3).map((f) => f.code).join(',')}`);
+
+/* 建议块渲染与转义 */
+check('adviceSection 渲染出建议块',
+  /<div class="advice">/.test(T.adviceSection(fundA, null, payload.funds)));
+check('adviceSection 带出可跳转的另一份额',
+  /data-goto="006479"/.test(T.adviceSection(fundA, null, payload.funds)));
+
+const evilSib = { ...fundC, limit_text: '<img src=x onerror=alert(1)>', status: '<b>注入</b>' };
+const evilOut = T.adviceSection(fundA, null, [evilSib, fundA]);
+check('建议块转义另一份额的字段', !/<img/.test(evilOut), evilOut.slice(0, 120));
 
 /* ---------- 汇总 ---------- */
 
