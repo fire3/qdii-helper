@@ -243,12 +243,12 @@ def _fund_extra(code: str) -> dict:
 
 
 def _fund_detail(code: str) -> dict:
-    """单只基金的完整详情（接口 B/D/G/H/I 聚合），按 code 做 30 分钟缓存。"""
+    """单只基金的完整详情（接口 B/G/H/I 聚合），按 code 做 30 分钟缓存。"""
     return DETAILS.get_or_build(code, lambda: _build_fund_detail(code))
 
 
 def _build_fund_detail(code: str) -> dict:
-    out: dict = {"code": code, "notices": [], "errors": []}
+    out: dict = {"code": code, "errors": []}
     try:
         d = ql.fetch_fund_detail(code)
         out["detail"] = {
@@ -269,16 +269,6 @@ def _build_fund_detail(code: str) -> dict:
         }
     except ql.UpstreamError as exc:
         out["errors"].append(f"详情接口不可用：{exc}")
-
-    try:
-        for item in ql.fetch_limit_notices(code, size=8):
-            out["notices"].append({
-                "date": item.get("PUBLISHDATEDesc"),
-                "title": item.get("TITLE"),
-                "id": item.get("ID"),
-            })
-    except ql.UpstreamError as exc:
-        out["errors"].append(f"公告接口不可用：{exc}")
 
     extra = _fund_extra(code)
     out["errors"].extend(extra.pop("errors"))

@@ -719,7 +719,7 @@ async function openDrawer(code) {
   const drawer = $('#drawer');
   const body = $('#drawer-body');
   drawer.hidden = false;
-  body.innerHTML = '<div class="loading">加载详情与公告…</div>';
+  body.innerHTML = '<div class="loading">加载详情…</div>';
 
   const kv = (data) => {
     const rows = [
@@ -741,7 +741,6 @@ async function openDrawer(code) {
   };
 
   let detailBlock = '';
-  let notices = '';
   let sections = '';
   let errorNote = '';
   let navs = [];
@@ -771,15 +770,6 @@ async function openDrawer(code) {
       + allocationSection(data.allocation, data.holders)
       + holdingsSection(data.holdings, data.report_date);
 
-    if (data.notices && data.notices.length) {
-      notices = `<div class="section-title">申购相关公告（接口 D，type=5）</div>` +
-        data.notices.map((n) => `<div class="notice">
-          <span class="d">${esc(n.date)}</span>${esc(n.title)}</div>`).join('');
-    } else {
-      notices = `<div class="section-title">申购相关公告</div>
-        <p class="muted small">未取到公告。</p>`;
-    }
-
     if (data.errors && data.errors.length) {
       errorNote = `<div class="note">${esc(data.errors.join('；'))}</div>`;
     }
@@ -793,7 +783,6 @@ async function openDrawer(code) {
     ${adviceSection(fund, detailData, dataset.funds)}
     ${kv(fund || { code })}
     ${sections}
-    ${notices}
     ${detailBlock}
     ${errorNote}
     <div class="note" style="margin-top:16px">${esc(dataset.disclaimer)}</div>`;

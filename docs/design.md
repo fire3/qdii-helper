@@ -554,7 +554,7 @@ pip install git+https://github.com/fire3/qdii-helper.git
 |---|---|
 | `GET /` | 前端页面 |
 | `GET /api/dataset[?refresh=1]` | 全量数据集（735 只 + 分类计数 + 汇总统计），进程内缓存 30 分钟 |
-| `GET /api/fund?code=NNNNNN` | 单只详情：接口 B 实时字段 + 接口 D 限购公告 + 接口 G 净值/规模/配置 + 接口 H 分周期收益 + 接口 I 持仓，按 code 缓存 30 分钟 |
+| `GET /api/fund?code=NNNNNN` | 单只详情：接口 B 实时字段 + 接口 G 净值/规模/配置 + 接口 H 分周期收益 + 接口 I 持仓，按 code 缓存 30 分钟 |
 | `GET /api/premium` | 场内 QDII 折溢价（接口 F） |
 
 设计要点：
