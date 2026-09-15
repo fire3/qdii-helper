@@ -18,6 +18,8 @@ from qdii_limit import (  # noqa: E402
     is_qdii,
     normalize_limit,
     parse_currency,
+    parse_pingzhong,
+    ts_to_date,
 )
 
 
@@ -141,6 +143,72 @@ class TestBuildFundWithRealRows(unittest.TestCase):
         self.assertTrue(f.is_on_exchange)
         self.assertFalse(f.is_buyable)
         self.assertEqual(f.limit_display, "场内交易")
+
+
+class TestPingzhongParse(unittest.TestCase):
+    """接口 G（pingzhongdata）的解析。
+
+    该接口返回的是 JS 文本（`/*注释*/var Name = <json>;`），不是 JSON，
+    解析器要能从注释与不可解析的块中恢复出可用的结构化数据。
+    """
+
+    FIXTURE = (
+        '/*基金代码*/var fS_code = "270042";'
+        '/*基金简称*/var fS_name = "广发纳斯达克100ETF联接人民币(QDII)A";'
+        '/*净值走势*/var Data_netWorthTrend = ['
+        '{"x":1344960000000,"y":1.0,"equityReturn":0,"unitMoney":""},'
+        '{"x":1789056000000,"y":8.1177,"equityReturn":0.86,"unitMoney":""}];'
+        '/*规模变动 mom-较上期环比*/var Data_fluctuationScale = '
+        '{"categories":["2025-12-31","2026-06-30"],'
+        '"series":[{"y":108.44,"mom":"1.81%"},{"y":122.23,"mom":"25.81%"}]};'
+        "var notJson = function(){ return 1; };"
+        '/*资产配置*/var Data_assetAllocation = {"series":'
+        '[{"name":"现金占净比","data":[5.84,9.04]},{"name":"净资产","type":"line",'
+        '"data":[162.0848,208.6345]}],"categories":["2026-03-31","2026-06-30"]};'
+    )
+
+    def test_parses_all_json_blocks(self):
+        data = parse_pingzhong(self.FIXTURE)
+        for key in ("fS_code", "fS_name", "Data_netWorthTrend",
+                    "Data_fluctuationScale", "Data_assetAllocation"):
+            self.assertIn(key, data)
+
+    def test_skips_unparseable_block(self):
+        data = parse_pingzhong(self.FIXTURE)
+        self.assertNotIn("notJson", data)
+
+    def test_scalar_and_list_values(self):
+        data = parse_pingzhong(self.FIXTURE)
+        self.assertEqual(data["fS_code"], "270042")
+        self.assertEqual(len(data["Data_netWorthTrend"]), 2)
+        self.assertAlmostEqual(data["Data_netWorthTrend"][-1]["y"], 8.1177)
+
+    def test_empty_input(self):
+        self.assertEqual(parse_pingzhong(""), {})
+
+    def test_scale_and_allocation_shape(self):
+        data = parse_pingzhong(self.FIXTURE)
+        scale = data["Data_fluctuationScale"]
+        self.assertEqual(scale["categories"], ["2025-12-31", "2026-06-30"])
+        self.assertEqual(scale["series"][-1]["y"], 122.23)
+
+        alloc = data["Data_assetAllocation"]
+        names = [s["name"] for s in alloc["series"]]
+        self.assertIn("现金占净比", names)
+        self.assertIn("净资产", names)
+
+
+class TestTsToDate(unittest.TestCase):
+    """上游时间戳按 UTC 解析会差一天，必须按 UTC+8 取日期。"""
+
+    def test_beijing_midnight(self):
+        # 270042 成立日 2012-08-15
+        self.assertEqual(ts_to_date(1344960000000), "2012-08-15")
+        # 最新净值日 2026-09-11
+        self.assertEqual(ts_to_date(1789056000000), "2026-09-11")
+
+    def test_returns_iso_format(self):
+        self.assertRegex(ts_to_date(1704067200000), r"^\d{4}-\d{2}-\d{2}$")
 
 
 if __name__ == "__main__":

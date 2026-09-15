@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -251,6 +252,68 @@ def fetch_exchange_premium(codes: list[str]) -> dict[str, float]:
         except (UpstreamError, json.JSONDecodeError):
             continue
     return {}
+
+
+def parse_pingzhong(text: str) -> dict:
+    """解析 pingzhongdata 的 JS 文本为 {块名: 已解析对象}。
+
+    文本形如 `/*注释*/var Data_netWorthTrend = <json>;`，逐个 `var` 块取值。
+    实测每个值内部不含分号，故按第一个分号截断；解析失败的块直接跳过。
+    """
+    out: dict = {}
+    for match in re.finditer(r"\bvar\s+([A-Za-z_$][\w$]*)\s*=\s*(.+?);", text, re.S):
+        try:
+            out[match.group(1)] = json.loads(match.group(2))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+CN_TZ = timezone(timedelta(hours=8))
+
+
+def ts_to_date(ms: float) -> str:
+    """上游时间戳是北京时间零点，按 UTC+8 取日期才不会差一天。"""
+    return datetime.fromtimestamp(ms / 1000, tz=CN_TZ).strftime("%Y-%m-%d")
+
+
+def fetch_pingzhong(code: str) -> dict:
+    """接口 G：净值走势 / 规模变动 / 资产配置 / 持有人结构（一次请求）。"""
+    url = f"https://fund.eastmoney.com/pingzhongdata/{code}.js"
+    text = http_get(url, referer=f"https://fund.eastmoney.com/{code}.html")
+    data = parse_pingzhong(text)
+    if not data:
+        raise UpstreamError(f"基金 {code} 的净值数据解析失败（上游可能已改版）")
+    return data
+
+
+def fetch_period_increase(code: str) -> list[dict]:
+    """接口 H：分周期收益率 + 同类平均 + 沪深300 + 同类排名。"""
+    params = urllib.parse.urlencode(
+        {"FCODE": code, "deviceid": "qdii-helper", "plat": "Android",
+         "product": "EFund", "version": "6.2.8"}
+    )
+    url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNPeriodIncrease?{params}"
+    try:
+        payload = json.loads(http_get(url))
+    except json.JSONDecodeError as exc:
+        raise UpstreamError(f"阶段涨幅解析失败: {exc}") from exc
+    return payload.get("Datas") or []
+
+
+def fetch_holdings(code: str) -> dict:
+    """接口 I：重仓股 / 债券持仓 / 联接基金的底层 ETF。"""
+    params = urllib.parse.urlencode(
+        {"FCODE": code, "deviceid": "qdii-helper", "plat": "Android",
+         "product": "EFund", "version": "6.2.8"}
+    )
+    url = f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?{params}"
+    try:
+        payload = json.loads(http_get(url))
+    except json.JSONDecodeError as exc:
+        raise UpstreamError(f"持仓数据解析失败: {exc}") from exc
+    # 报告期在响应顶层而非 Datas 内，一并带回免得再取一次
+    return {**(payload.get("Datas") or {}), "Expansion": payload.get("Expansion")}
 
 
 # --------------------------------------------------------------------------

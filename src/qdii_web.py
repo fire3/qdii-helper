@@ -144,12 +144,111 @@ def _limit_bands(records: list[dict]) -> list[dict]:
 DATASET = Dataset()
 
 
+class CodeCache:
+    """按基金代码缓存的详情数据，TTL 与数据集对齐。"""
+
+    def __init__(self, ttl: float) -> None:
+        self._lock = threading.Lock()
+        self._items: dict[str, tuple[float, dict]] = {}
+        self._ttl = ttl
+
+    def get_or_build(self, code: str, build) -> dict:
+        with self._lock:
+            hit = self._items.get(code)
+            if hit is not None and time.time() - hit[0] < self._ttl:
+                return hit[1]
+            built = build()
+            self._items[code] = (time.time(), built)
+            return built
+
+
+DETAILS = CodeCache(ql.CACHE_TTL)
+
+# 净值走势只回传最近约 3.2 年（800 个交易日），前端区间最大到「近3年」，
+# 全量 3000+ 点没有意义，白白撑大响应体。
+NAV_POINTS = 800
+
+
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
 
+def _num(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _fund_extra(code: str) -> dict:
+    """接口 G / H / I：净值走势、阶段涨幅、规模与持仓。
+
+    每一块独立容错：某一块失败只影响对应区块，其余照常返回。
+    """
+    out: dict = {"nav": [], "scale": None, "allocation": None, "holders": None,
+                 "periods": [], "holdings": {}, "report_date": None, "errors": []}
+
+    try:
+        data = ql.fetch_pingzhong(code)
+        trend = data.get("Data_netWorthTrend") or []
+        out["nav"] = [
+            {"date": ql.ts_to_date(p["x"]), "nav": p.get("y"),
+             "change": p.get("equityReturn")}
+            for p in trend if p.get("x") and p.get("y") is not None
+        ][-NAV_POINTS:]
+        out["scale"] = data.get("Data_fluctuationScale")
+        out["allocation"] = data.get("Data_assetAllocation")
+        out["holders"] = data.get("Data_holderStructure")
+    except (ql.UpstreamError, KeyError, TypeError, ValueError) as exc:
+        out["errors"].append(f"净值走势不可用：{exc}")
+
+    try:
+        out["periods"] = [
+            {"key": item.get("title"), "ret": _num(item.get("syl")),
+             "avg": _num(item.get("avg")), "bench": _num(item.get("hs300")),
+             "rank": _int(item.get("rank")), "total": _int(item.get("sc"))}
+            for item in ql.fetch_period_increase(code)
+        ]
+    except ql.UpstreamError as exc:
+        out["errors"].append(f"阶段涨幅不可用：{exc}")
+
+    try:
+        raw = ql.fetch_holdings(code)
+        out["report_date"] = raw.get("Expansion")
+        out["holdings"] = {
+            "stocks": [
+                {"code": s.get("GPDM"), "name": s.get("GPJC"),
+                 "weight": _num(s.get("JZBL")), "action": s.get("PCTNVCHGTYPE"),
+                 "delta": _num(s.get("PCTNVCHG"))}
+                for s in raw.get("fundStocks") or []
+            ],
+            "bonds": [
+                {"code": b.get("ZQDM"), "name": b.get("ZQMC"),
+                 "weight": _num(b.get("ZJZBL"))}
+                for b in raw.get("fundboods") or []
+            ],
+            "etf": ({"code": raw.get("ETFCODE"), "name": raw.get("ETFSHORTNAME")}
+                    if raw.get("ETFCODE") else None),
+        }
+    except ql.UpstreamError as exc:
+        out["errors"].append(f"持仓数据不可用：{exc}")
+
+    return out
+
+
 def _fund_detail(code: str) -> dict:
-    """接口 B 详情 + 接口 D 限购公告，聚合为单只基金的详情。"""
+    """单只基金的完整详情（接口 B/D/G/H/I 聚合），按 code 做 30 分钟缓存。"""
+    return DETAILS.get_or_build(code, lambda: _build_fund_detail(code))
+
+
+def _build_fund_detail(code: str) -> dict:
     out: dict = {"code": code, "notices": [], "errors": []}
     try:
         d = ql.fetch_fund_detail(code)
@@ -181,6 +280,10 @@ def _fund_detail(code: str) -> dict:
             })
     except ql.UpstreamError as exc:
         out["errors"].append(f"公告接口不可用：{exc}")
+
+    extra = _fund_extra(code)
+    out["errors"].extend(extra.pop("errors"))
+    out.update(extra)
     return out
 
 

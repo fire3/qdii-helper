@@ -18,6 +18,9 @@
 | 限购变动原因 / 公告日期 | **接口 D** 基金公告 | 1 次请求 / 小 | `type=5` 是限购类公告 |
 | 代码 → 名称 / 类型 | **接口 E** 全量基金列表 | 1 次请求 / ~3 MB | 可本地缓存 |
 | 场内 ETF/LOF 溢价率 | **接口 F** 行情推送 | 1 次请求 / 小 | 折价率 `f402` |
+| 净值走势 / 规模变动 / 资产配置 | **接口 G** pingzhongdata | 1 次请求 / ~0.5 MB | JS 文本，含全历史净值与季度规模 |
+| 分周期收益率 + 同类排名 | **接口 H** 阶段涨幅 | 1 次请求 / 小 | 含同类平均与沪深300 |
+| 重仓股 / 债券 / 底层 ETF | **接口 I** 持仓明细 | 1 次请求 / 小 | 联接基金返回底层 ETF |
 
 ---
 
@@ -509,7 +512,180 @@ GET https://push2delay.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f2,f12,f1
 
 ---
 
-## 8. 已失效 / 弃用接口
+## 8. 接口 G：净值走势 / 规模 / 配置（pingzhongdata）
+
+单只基金详情页的**全量数据包**，一次请求即可拿到全历史净值、季度规模、资产配置、
+持有人结构与基金经理。是「看走势、看规模、看仓位」的首选。
+
+```
+GET https://fund.eastmoney.com/pingzhongdata/{code}.js
+```
+
+### 8.1 请求头与响应
+
+| 项 | 值 |
+|---|---|
+| `Referer` | `https://fund.eastmoney.com/{code}.html` |
+| HTTP | `200`，`application/javascript` |
+| 体积 | 约 **518 KB**（实测 270042），UTF-8 **带 BOM** |
+| 格式 | JS 文本，`/*注释*/var Name = <json>;` 逐块排列，**不是合法 JSON** |
+
+### 8.2 解析要点
+
+每个值内部不含分号（实测），因此按 `var Name = ...;` 逐块截取后可直接 `json.loads`：
+
+```python
+import json, re
+
+def parse_pingzhong(text: str) -> dict:
+    out = {}
+    for m in re.finditer(r"\bvar\s+([A-Za-z_$][\w$]*)\s*=\s*(.+?);", text, re.S):
+        try:
+            out[m.group(1)] = json.loads(m.group(2))
+        except json.JSONDecodeError:
+            continue          # 非 JSON 的块（如函数）直接跳过
+    return out
+```
+
+实测 270042 可解析出 **26 个块**。
+
+### 8.3 关键块字典
+
+| 块名 | 结构 | 说明 |
+|---|---|---|
+| `Data_netWorthTrend` | `[{"x":1344960000000,"y":1.0,"equityReturn":0}, ...]` | **全历史单位净值**，3392 点；`x` 为毫秒时间戳 |
+| `Data_ACWorthTrend` | `[[1344960000000, 1.0], ...]` | 累计净值 |
+| `Data_fluctuationScale` | `{"categories":["2026-06-30",...],"series":[{"y":122.23,"mom":"25.81%"},...]}` | **季度净资产规模（亿元）** |
+| `Data_assetAllocation` | `{"series":[{"name":"现金占净比","data":[...]},{"name":"净资产","type":"line","data":[...]}],"categories":[...]}` | 资产配置（最新季度） |
+| `Data_holderStructure` | `{"series":[{"name":"机构持有比例","data":[0.66,...]},...],"categories":[...]}` | 持有人结构 |
+| `Data_buySedemption` | `{"series":[{"name":"期间申购",...},{"name":"期间赎回"},{"name":"总份额"}],"categories":[...]}` | 期间申赎 |
+| `Data_currentFundManager` | `[{name, star, workTime, fundSize, power:{...}, profit:{...}}]` | 现任基金经理 |
+| `Data_rateInSimilarPersent` | `[[ts, 百分比], ...]` | 同类排名百分比走势 |
+
+### 8.4 时间戳换算（易错）
+
+`x` 是**北京时间零点**的毫秒时间戳，直接按 UTC 取日期会**差一天**，需按 UTC+8：
+
+```python
+from datetime import datetime, timedelta, timezone
+CN_TZ = timezone(timedelta(hours=8))
+datetime.fromtimestamp(ms / 1000, tz=CN_TZ).strftime("%Y-%m-%d")
+# 1344960000000 -> 2012-08-15（270042 成立日）
+```
+
+### 8.5 样本（270042，2026-09-11）
+
+```
+净值走势   3392 点，2012-08-15(1.0) → 2026-09-11(8.1177)
+规模变动   93.14 → 106.52 → 108.44 → 97.16 → 122.23 亿元（近 5 个季度）
+资产配置   股票 0% / 债券 0% / 现金 9.04% / 净资产 208.63 亿元
+持有人     机构 0.12% / 个人 99.88%
+```
+
+> 联接基金（FOF）的「股票占净比」为 0，因为它持有的是 ETF 份额而非股票，
+> 需结合接口 I 的 `ETFCODE` 理解。
+
+---
+
+## 9. 接口 H：分周期收益率与同类排名
+
+一次拿到全部周期收益，并附同类平均、沪深300 与同类排名，是「这只基金值不值得买」的核心依据。
+
+```
+GET https://fundmobapi.eastmoney.com/FundMNewApi/FundMNPeriodIncrease
+    ?FCODE=270042&deviceid=qdii-helper&plat=Android&product=EFund&version=6.2.8
+```
+
+### 9.1 响应结构
+
+```json
+{"Datas":[{"title":"1N","syl":"15.00","avg":"-0.56","hs300":"-0.93",
+           "rank":"118","sc":"349","diff":"4"}, ...],
+ "Expansion":{"ESTABDATE":"2012-08-15","TIME":"2026-09-11"}}
+```
+
+### 9.2 字段与 `title` 枚举
+
+| 字段 | 说明 |
+|---|---|
+| `title` | 周期键，见下表 |
+| `syl` | 本基金区间收益率 % |
+| `avg` | **同类平均** % |
+| `hs300` | **沪深300** 同期 % |
+| `rank` / `sc` | **同类排名 / 同类总数** |
+| `diff` | 与同类平均之差 |
+
+| title | 含义 | title | 含义 |
+|---|---|---|---|
+| `Z` | 近 1 周 | `2N` | 近 2 年 |
+| `Y` | 近 1 月 | `3N` | 近 3 年 |
+| `3Y` | 近 3 月 | `5N` | 近 5 年 |
+| `6Y` | 近 6 月 | `JN` | 今年来 |
+| `1N` | 近 1 年 | `LN` | 成立来 |
+
+### 9.3 注意事项
+
+- `LN`（成立来）的 `avg` / `hs300` / `rank` 常为空字符串，展示时需兜底
+- **`title` 里 `Y` 表示「月」、`N` 表示「年」**，不要按字面理解成 y/n
+
+### 9.4 实测样本（270042）
+
+```
+近1周  -0.69%   同类平均 -2.53%   沪深300 -2.08%   排名 105/362
+近1月  -0.88%   同类平均 -3.32%   沪深300 -3.98%   排名 135/362
+近1年  +15.00%  同类平均 -0.56%   沪深300 -0.93%   排名 118/349
+成立来 +885.36%（无同类基准）
+```
+
+---
+
+## 10. 接口 I：重仓股 / 债券 / 底层 ETF
+
+```
+GET https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition
+    ?FCODE=270042&deviceid=qdii-helper&plat=Android&product=EFund&version=6.2.8
+```
+
+### 10.1 响应结构
+
+```json
+{"Datas":{"fundStocks":[...], "fundboods":[...], "fundfofs":[],
+          "ETFCODE":"159941", "ETFSHORTNAME":"纳指ETF广发"},
+ "Expansion":"2026-06-30"}
+```
+
+> **报告期 `Expansion` 在响应顶层**，不在 `Datas` 内 —— 容易漏取。
+
+### 10.2 字段字典
+
+`Datas.fundStocks`（重仓股）：
+
+| 字段 | 说明 | 示例 |
+|---|---|---|
+| `GPDM` | 股票代码（美股为 Ticker） | `NVDA` |
+| `GPJC` | 股票简称 | `英伟达` |
+| `JZBL` | 占净值比 % | `4.33` |
+| `PCTNVCHGTYPE` | 较上期变动方向 | `增持` / `减持` / `新增` |
+| `PCTNVCHG` | 变动幅度 % | `0.99` |
+
+`Datas.fundboods`（债券）：`ZQDM` / `ZQMC` / `ZJZBL`（占净值比）。
+
+`Datas.ETFCODE` / `ETFSHORTNAME`：**联接基金持有的底层 ETF**。
+
+### 10.3 实测差异（关键）
+
+| 类型 | 样本 | `fundStocks` | `ETFCODE` |
+|---|---|---|---|
+| 指数 ETF 联接 | `270042` | 空 | `159941 纳指ETF广发` |
+| 直投型 QDII | `000041` | 10 只（英伟达 4.33%…） | 空 |
+| 含债 QDII | `161125` | 10 只 | 空（另有 2 只债券） |
+| 场内 ETF | `513100` | 10 只 | 空 |
+
+→ 联接基金必须回退展示 `ETFCODE`，否则「主要成分」会是空的。
+
+---
+
+## 11. 已失效 / 弃用接口
 
 | 接口 | 状态 | 说明 |
 |---|---|---|
@@ -520,7 +696,7 @@ GET https://push2delay.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f2,f12,f1
 
 ---
 
-## 9. 参考实现
+## 12. 参考实现
 
 | 项目 | 语言 | 价值 |
 |---|---|---|
@@ -530,7 +706,7 @@ GET https://push2delay.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f2,f12,f1
 
 ---
 
-## 10. 综合注意事项
+## 13. 综合注意事项
 
 1. **合规**：以上均为非官方接口，请控制频率（建议 ≥ 30 分钟一次），禁止高频轮询。
 2. **免责**：限购额度最终以基金公司公告为准，工具输出仅供参考。

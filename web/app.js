@@ -286,6 +286,281 @@ function render() {
   renderTable();
 }
 
+/* ---------------- 详情：格式化与几何（纯函数，便于测试） ---------------- */
+
+const PERIOD_LABELS = {
+  Z: '近1周', Y: '近1月', '3Y': '近3月', '6Y': '近6月', '1N': '近1年',
+  '2N': '近2年', '3N': '近3年', '5N': '近5年', JN: '今年来', LN: '成立来',
+};
+
+// 收益率表的展示顺序；接口 H 可能只返回其中一部分
+const PERIOD_ORDER = ['Z', 'Y', '3Y', '6Y', '1N', '2N', '3N', '5N', 'JN', 'LN'];
+
+const RANGE_OPTIONS = [
+  { label: '近1月', days: 30 },
+  { label: '近3月', days: 90 },
+  { label: '近6月', days: 182 },
+  { label: '近1年', days: 365 },
+  { label: '近3年', days: 1095 },
+];
+const DEFAULT_RANGE = 365;
+
+const CHART_W = 480;
+const CHART_H = 150;
+const CHART_PAD = 22;
+
+const isBlank = (v) => v === null || v === undefined || v === '' || Number.isNaN(Number(v));
+
+const fmtPct = (v) => (isBlank(v) ? '—' : `${Number(v) > 0 ? '+' : ''}${Number(v).toFixed(2)}%`);
+
+const fmtNum = (v, digits = 4) => (isBlank(v) ? '—' : Number(v).toFixed(digits));
+
+const trendClass = (v) => (isBlank(v) ? '' : Number(v) > 0 ? 'pos' : Number(v) < 0 ? 'neg' : '');
+
+// 取最近 N 天的净值点；区间内不足两个点时退回最后两个点，保证能画出线
+function sliceByDays(navs, days) {
+  if (!Array.isArray(navs) || !navs.length) return [];
+  const last = Date.parse(navs[navs.length - 1].date);
+  if (Number.isNaN(last)) return navs.slice();
+  const cutoff = last - days * 86400000;
+  const out = navs.filter((p) => Date.parse(p.date) >= cutoff);
+  return out.length >= 2 ? out : navs.slice(-2);
+}
+
+// 区间涨幅与最大回撤（最大回撤 = 峰值到谷底的最大跌幅）
+function rangeStats(navs) {
+  const vals = (navs || []).map((p) => p.nav).filter((v) => typeof v === 'number');
+  if (vals.length < 2) return { changePct: null, maxDrawdown: null, high: null, low: null };
+  let peak = vals[0];
+  let maxDrawdown = 0;
+  for (const v of vals) {
+    if (v > peak) peak = v;
+    maxDrawdown = Math.max(maxDrawdown, (peak - v) / peak);
+  }
+  const first = vals[0];
+  const last = vals[vals.length - 1];
+  return {
+    changePct: first ? ((last - first) / first) * 100 : null,
+    maxDrawdown: maxDrawdown * 100,
+    high: Math.max(...vals),
+    low: Math.min(...vals),
+  };
+}
+
+// 把数值序列映射为 SVG 折线 / 面积路径
+function buildLinePath(values, w, h, pad) {
+  if (!Array.isArray(values) || !values.length) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = (max - min) || 1;
+  const innerW = w - pad * 2;
+  const innerH = h - pad * 2;
+  const n = values.length;
+  const xOf = (i) => pad + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
+  const yOf = (v) => pad + innerH - ((v - min) / span) * innerH;
+  const line = 'M' + values.map((v, i) => `${xOf(i).toFixed(2)},${yOf(v).toFixed(2)}`).join(' L');
+  const base = (h - pad).toFixed(2);
+  const area = `${line} L${xOf(n - 1).toFixed(2)},${base} L${xOf(0).toFixed(2)},${base} Z`;
+  return { line, area, min, max, xOf, yOf };
+}
+
+/* ---------------- 详情：区块渲染 ---------------- */
+
+function perfSection(periods) {
+  const byKey = Object.fromEntries((periods || []).map((p) => [p.key, p]));
+  const rows = PERIOD_ORDER.filter((k) => byKey[k]).map((k) => {
+    const p = byKey[k];
+    const rank = p.rank && p.total ? `${p.rank}/${p.total}` : '—';
+    return `<tr>
+      <td>${esc(PERIOD_LABELS[k])}</td>
+      <td class="num ${trendClass(p.ret)}">${fmtPct(p.ret)}</td>
+      <td class="num">${fmtPct(p.avg)}</td>
+      <td class="num">${fmtPct(p.bench)}</td>
+      <td class="num">${esc(rank)}</td>
+    </tr>`;
+  }).join('');
+
+  const body = rows || '<tr><td colspan="5" class="muted">暂无阶段涨幅数据。</td></tr>';
+  return `<div class="section-title">收益表现</div>
+    <table class="perf-table"><thead><tr>
+      <th>周期</th><th class="num">本基金</th><th class="num">同类平均</th>
+      <th class="num">沪深300</th><th class="num">同类排名</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function navSection(navs) {
+  if (!navs || navs.length < 2) {
+    return `<div class="section-title">净值走势</div>
+      <p class="muted small">暂无净值数据。</p>`;
+  }
+  const chips = RANGE_OPTIONS.map((o) =>
+    `<button class="chip${o.days === DEFAULT_RANGE ? ' is-on' : ''}" data-days="${o.days}">${o.label}</button>`,
+  ).join('');
+  return `<div class="section-title">净值走势</div>
+    <div class="chart-wrap">
+      <div class="chips chart-chips">${chips}</div>
+      <div class="chart-canvas"></div>
+      <div class="chart-tip" hidden></div>
+    </div>`;
+}
+
+function initChart(scope, navs) {
+  const wrap = scope.querySelector('.chart-wrap');
+  if (!wrap) return;
+  const canvas = wrap.querySelector('.chart-canvas');
+  const tip = wrap.querySelector('.chart-tip');
+
+  const paint = (days) => {
+    const pts = sliceByDays(navs, days);
+    const geo = buildLinePath(pts.map((p) => p.nav), CHART_W, CHART_H, CHART_PAD);
+    if (!geo) {
+      canvas.innerHTML = '<p class="muted small">区间内数据不足。</p>';
+      return;
+    }
+    const stats = rangeStats(pts);
+    const drawdown = stats.maxDrawdown === null ? '—' : `-${stats.maxDrawdown.toFixed(2)}%`;
+
+    canvas.innerHTML = `<svg viewBox="0 0 ${CHART_W} ${CHART_H}" class="chart-svg">
+      <defs><linearGradient id="navFill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="var(--accent)" stop-opacity=".26"/>
+        <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/>
+      </linearGradient></defs>
+      <path d="${geo.area}" fill="url(#navFill)"/>
+      <path d="${geo.line}" fill="none" stroke="var(--accent)" stroke-width="1.6"
+            stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+      <circle class="chart-dot" r="3.2" fill="var(--accent)" hidden/>
+    </svg>
+    <div class="chart-stats">
+      <span>区间涨幅 <b class="${trendClass(stats.changePct)}">${fmtPct(stats.changePct)}</b></span>
+      <span>最大回撤 <b class="neg">${drawdown}</b></span>
+      <span>区间高/低 <b>${fmtNum(stats.high)} / ${fmtNum(stats.low)}</b></span>
+    </div>`;
+
+    const svg = canvas.querySelector('svg');
+    const dot = canvas.querySelector('.chart-dot');
+    svg.addEventListener('mousemove', (e) => {
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width) return;
+      const vbX = ((e.clientX - rect.left) / rect.width) * CHART_W;
+      const n = pts.length;
+      const idx = Math.max(0, Math.min(n - 1,
+        Math.round(((vbX - CHART_PAD) / (CHART_W - CHART_PAD * 2)) * (n - 1))));
+      const p = pts[idx];
+      dot.setAttribute('cx', geo.xOf(idx).toFixed(2));
+      dot.setAttribute('cy', geo.yOf(p.nav).toFixed(2));
+      dot.hidden = false;
+      tip.hidden = false;
+      tip.textContent = `${p.date}　${fmtNum(p.nav)}`;
+      tip.style.left = `${(vbX / CHART_W) * 100}%`;
+    });
+    svg.addEventListener('mouseleave', () => { dot.hidden = true; tip.hidden = true; });
+  };
+
+  wrap.querySelectorAll('.chart-chips .chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      wrap.querySelectorAll('.chart-chips .chip')
+        .forEach((b) => b.classList.toggle('is-on', b === btn));
+      paint(Number(btn.dataset.days));
+    });
+  });
+  paint(DEFAULT_RANGE);
+}
+
+function scaleSection(scale) {
+  const cats = (scale && scale.categories) || [];
+  const series = (scale && scale.series) || [];
+  if (!cats.length || !series.length) return '';
+  const values = series.map((s) => s.y).filter((v) => typeof v === 'number');
+  const max = Math.max(...values) || 1;
+  const bars = cats.map((c, i) => {
+    const item = series[i] || {};
+    const h = typeof item.y === 'number' ? Math.max(3, (item.y / max) * 100) : 0;
+    return `<div class="bar" title="${esc(c)}　${esc(item.y)} 亿元">
+      <div class="bar-track"><div class="bar-fill" style="height:${h.toFixed(1)}%"></div></div>
+      <span class="bar-x">${esc(String(c).slice(2, 7))}</span>
+    </div>`;
+  }).join('');
+  const latest = series[series.length - 1] || {};
+  return `<div class="section-title">规模变动</div>
+    <p class="muted small">最新 ${esc(cats[cats.length - 1])}：
+      <b>${esc(latest.y)} 亿元</b>${latest.mom ? `（环比 ${esc(latest.mom)}）` : ''}</p>
+    <div class="bars">${bars}</div>`;
+}
+
+function allocationSection(allocation, holders) {
+  const blocks = [];
+  const pct = (v) => (v === null ? '—' : `${v.toFixed(2)}%`);
+
+  if (allocation && (allocation.categories || []).length) {
+    const i = allocation.categories.length - 1;
+    const pick = (prefix) => {
+      const s = (allocation.series || []).find((x) => String(x.name || '').startsWith(prefix));
+      return s && typeof s.data[i] === 'number' ? s.data[i] : null;
+    };
+    const net = pick('净资产');
+    blocks.push(`<div class="section-title">资产配置 <span class="hint">${esc(allocation.categories[i])}</span></div>
+      <dl class="kv">
+        <dt>股票占净比</dt><dd>${pct(pick('股票'))}</dd>
+        <dt>债券占净比</dt><dd>${pct(pick('债券'))}</dd>
+        <dt>现金占净比</dt><dd>${pct(pick('现金'))}</dd>
+        <dt>净资产</dt><dd>${net === null ? '—' : `${net.toFixed(2)} 亿元`}</dd>
+      </dl>`);
+  }
+
+  if (holders && (holders.categories || []).length) {
+    const i = holders.categories.length - 1;
+    const pick = (name) => {
+      const s = (holders.series || []).find((x) => x.name === name);
+      return s && typeof s.data[i] === 'number' ? s.data[i] : null;
+    };
+    blocks.push(`<div class="section-title">持有人结构 <span class="hint">${esc(holders.categories[i])}</span></div>
+      <dl class="kv">
+        <dt>机构持有</dt><dd>${pct(pick('机构持有比例'))}</dd>
+        <dt>个人持有</dt><dd>${pct(pick('个人持有比例'))}</dd>
+      </dl>`);
+  }
+
+  return blocks.join('');
+}
+
+function holdingsSection(holdings, reportDate) {
+  const h = holdings || {};
+  const stocks = h.stocks || [];
+  const bonds = h.bonds || [];
+  const etf = h.etf;
+  if (!stocks.length && !bonds.length && !etf) return '';
+
+  const parts = [`<div class="section-title">主要成分${
+    reportDate ? ` <span class="hint">${esc(reportDate)}</span>` : ''}</div>`];
+
+  if (etf) {
+    parts.push(`<p class="muted small">跟踪标的：
+      <b>${esc(etf.name || '')}</b> <span class="mono">${esc(etf.code || '')}</span></p>`);
+  }
+
+  if (stocks.length) {
+    parts.push(`<table class="mini-table"><thead><tr>
+      <th>股票</th><th class="num">占净值比</th><th class="num">较上期</th>
+    </tr></thead><tbody>${stocks.map((s) => `<tr>
+      <td>${esc(s.name)} <span class="mono muted">${esc(s.code)}</span></td>
+      <td class="num">${s.weight === null ? '—' : `${s.weight.toFixed(2)}%`}</td>
+      <td class="num ${trendClass(s.delta)}">${esc(s.action || '')}${
+        s.delta === null ? '' : ` ${fmtPct(s.delta)}`}</td>
+    </tr>`).join('')}</tbody></table>`);
+  } else if (bonds.length) {
+    parts.push(`<table class="mini-table"><thead><tr>
+      <th>债券</th><th class="num">占净值比</th>
+    </tr></thead><tbody>${bonds.map((b) => `<tr>
+      <td>${esc(b.name)} <span class="mono muted">${esc(b.code)}</span></td>
+      <td class="num">${b.weight === null ? '—' : `${b.weight.toFixed(2)}%`}</td>
+    </tr>`).join('')}</tbody></table>`);
+  } else if (etf) {
+    parts.push('<p class="muted small">该基金为联接 / FOF 型，直接持有底层 ETF，不披露个股持仓。</p>');
+  }
+
+  return parts.join('');
+}
+
 /* ---------------- 详情抽屉 ---------------- */
 
 async function openDrawer(code) {
@@ -314,14 +589,19 @@ async function openDrawer(code) {
       `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`;
   };
 
-  let extra = '';
+  let detailBlock = '';
   let notices = '';
+  let sections = '';
+  let errorNote = '';
+  let navs = [];
+
   try {
     const res = await fetch(`/api/fund?code=${encodeURIComponent(code)}`);
     const data = await res.json();
+
     if (data.detail) {
       const d = data.detail;
-      extra = `<div class="section-title">实时详情（接口 B）</div><dl class="kv">
+      detailBlock = `<div class="section-title">实时详情（接口 B）</div><dl class="kv">
         <dt>基金公司</dt><dd>${esc(d.company || '—')}</dd>
         <dt>基金经理</dt><dd>${esc(d.manager || '—')}</dd>
         <dt>实时状态</dt><dd>${esc(d.purchase_status || '—')}</dd>
@@ -330,26 +610,41 @@ async function openDrawer(code) {
         <dt>风险等级</dt><dd>${esc(d.risk_level || '—')}</dd>
       </dl>`;
     }
+
+    navs = data.nav || [];
+    sections = perfSection(data.periods)
+      + navSection(navs)
+      + scaleSection(data.scale)
+      + allocationSection(data.allocation, data.holders)
+      + holdingsSection(data.holdings, data.report_date);
+
     if (data.notices && data.notices.length) {
       notices = `<div class="section-title">申购相关公告（接口 D，type=5）</div>` +
         data.notices.map((n) => `<div class="notice">
           <span class="d">${esc(n.date)}</span>${esc(n.title)}</div>`).join('');
     } else {
-      notices = '<div class="section-title">申购相关公告</div><p style="color:var(--muted);font-size:12.5px">未取到公告。</p>';
+      notices = `<div class="section-title">申购相关公告</div>
+        <p class="muted small">未取到公告。</p>`;
     }
+
     if (data.errors && data.errors.length) {
-      extra += `<div class="note">${esc(data.errors.join('；'))}</div>`;
+      errorNote = `<div class="note">${esc(data.errors.join('；'))}</div>`;
     }
   } catch (err) {
-    extra = `<div class="note">详情加载失败：${esc(err.message)}</div>`;
+    errorNote = `<div class="note">详情加载失败：${esc(err.message)}</div>`;
   }
 
   body.innerHTML = `
     <h3>${esc(fund ? fund.name : code)}</h3>
     <p class="sub">${esc(code)}</p>
     ${kv(fund || { code })}
-    ${extra}${notices}
+    ${sections}
+    ${notices}
+    ${detailBlock}
+    ${errorNote}
     <div class="note" style="margin-top:16px">${esc(dataset.disclaimer)}</div>`;
+
+  initChart(body, navs);
 }
 
 function closeDrawer() { $('#drawer').hidden = true; }

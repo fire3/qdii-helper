@@ -53,6 +53,8 @@ const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8')
        get state() { return state; }, set state(v) { state = v; },
        get dataset() { return dataset; }, set dataset(v) { dataset = v; },
        visibleFunds, set, toggle, SORTERS, DEFAULT_STATE, readHash,
+       PERIOD_LABELS, PERIOD_ORDER, sliceByDays, rangeStats, buildLinePath,
+       fmtPct, fmtNum, trendClass,
      };`;
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox);
@@ -180,6 +182,79 @@ const combo = apply({ regions: ['纳斯达克100'], cap: 100, sort: 'limit-asc' 
 check('组合筛选是各条件的交集',
   combo.every((r) => r.region === '纳斯达克100' && r.limit !== null && r.limit <= 100 && r.buyable));
 check('组合筛选结果 ≤ 单归类结果', combo.length <= nasdaq.length);
+
+/* ---------- 详情：格式化与净值几何 ---------- */
+
+check('周期标签齐全', T.PERIOD_ORDER.every((k) => T.PERIOD_LABELS[k]), T.PERIOD_ORDER.join(','));
+check('近1年标签正确', T.PERIOD_LABELS['1N'] === '近1年');
+check('成立来标签正确', T.PERIOD_LABELS.LN === '成立来');
+
+check('fmtPct 空值兜底', T.fmtPct(null) === '—' && T.fmtPct('') === '—' && T.fmtPct(undefined) === '—');
+check('fmtPct 带符号', T.fmtPct(1.5) === '+1.50%' && T.fmtPct(-0.69) === '-0.69%');
+check('fmtPct 零不带符号', T.fmtPct(0) === '0.00%');
+check('fmtNum 空值兜底', T.fmtNum(null) === '—' && T.fmtNum(NaN) === '—');
+check('fmtNum 保留小数位', T.fmtNum(8.1177) === '8.1177' && T.fmtNum(1.5, 2) === '1.50');
+
+check('trendClass 涨跌着色',
+  T.trendClass(1) === 'pos' && T.trendClass(-1) === 'neg'
+  && T.trendClass(0) === '' && T.trendClass(null) === '');
+
+/* 构造 800 个连续交易日的净值，用于区间切片与统计 */
+const DAY = 86400000;
+const END = Date.parse('2026-09-11');
+const series = Array.from({ length: 800 }, (_, i) => {
+  const t = END - (799 - i) * DAY;
+  return { date: new Date(t).toISOString().slice(0, 10), nav: 100 + i, change: 0 };
+});
+
+const last30 = T.sliceByDays(series, 30);
+check('sliceByDays 近1月约为 31 个点',
+  last30.length >= 29 && last30.length <= 32, `实际 ${last30.length}`);
+check('sliceByDays 结果全部落在区间内',
+  last30.every((p) => Date.parse(p.date) >= END - 30 * DAY));
+check('sliceByDays 保留最后一个点',
+  last30[last30.length - 1].date === series[series.length - 1].date);
+
+const last365 = T.sliceByDays(series, 365);
+check('sliceByDays 近1年多于近1月', last365.length > last30.length);
+check('sliceByDays 近3年多于近1年', T.sliceByDays(series, 1095).length > last365.length);
+check('sliceByDays 空输入返回空', T.sliceByDays([], 30).length === 0);
+check('sliceByDays 数据不足时退回末尾点',
+  T.sliceByDays(series.slice(-1), 30).length === 1);
+
+/* 10 → 12 → 6 → 9：区间跌幅 10%，自峰值回撤 50% */
+const stats = T.rangeStats([
+  { nav: 10 }, { nav: 12 }, { nav: 6 }, { nav: 9 },
+]);
+check('rangeStats 区间涨幅', Math.abs(stats.changePct - (-10)) < 1e-9, `实际 ${stats.changePct}`);
+check('rangeStats 最大回撤', Math.abs(stats.maxDrawdown - 50) < 1e-9, `实际 ${stats.maxDrawdown}`);
+check('rangeStats 区间高低', stats.high === 12 && stats.low === 6);
+check('rangeStats 单调上涨时回撤为 0',
+  T.rangeStats([{ nav: 1 }, { nav: 2 }, { nav: 3 }]).maxDrawdown === 0);
+check('rangeStats 点数不足返回空值',
+  T.rangeStats([{ nav: 1 }]).changePct === null);
+check('rangeStats 忽略非数值点',
+  T.rangeStats([{ nav: 1 }, { nav: null }, { nav: 3 }]).maxDrawdown === 0);
+
+const geo = T.buildLinePath([1, 2, 3], 100, 50, 10);
+check('buildLinePath 返回折线与面积', typeof geo.line === 'string' && typeof geo.area === 'string');
+check('buildLinePath 折线从起点开始', geo.line.startsWith('M'));
+check('buildLinePath 三个点两段线', (geo.line.match(/L/g) || []).length === 2);
+check('buildLinePath 面积路径闭合', geo.area.endsWith('Z'));
+check('buildLinePath 上下边界贴合 padding',
+  Math.abs(geo.yOf(3) - 10) < 1e-9 && Math.abs(geo.yOf(1) - 40) < 1e-9);
+check('buildLinePath 首尾贴边',
+  Math.abs(geo.xOf(0) - 10) < 1e-9 && Math.abs(geo.xOf(2) - 90) < 1e-9);
+check('buildLinePath 空输入返回 null', T.buildLinePath([], 100, 50, 10) === null);
+check('buildLinePath 常数列不产生 NaN',
+  !T.buildLinePath([5, 5, 5], 100, 50, 10).line.includes('NaN'));
+
+/* ---------- 契约：详情接口字段名与前端一致 ---------- */
+
+check('数据集声明免责声明', typeof payload.disclaimer === 'string' && payload.disclaimer.length > 0);
+check('分类计数与实际基金数一致',
+  payload.categories.regions.reduce((s, c) => s + c.count, 0) === payload.total,
+  `regions 合计 ${payload.categories.regions.reduce((s, c) => s + c.count, 0)} vs ${payload.total}`);
 
 /* ---------- 汇总 ---------- */
 

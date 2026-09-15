@@ -68,7 +68,13 @@ python3 src/qdii_web.py --host 0.0.0.0  # 局域网可访问
 - **状态筛选**：可买 / 限大额 / 开放申购 / 暂停申购 / 场内交易 / 全部
 - **搜索**：基金代码或名称
 - **排序**：额度从紧到松 / 从松到紧 / 可买优先 / 按名称
-- **详情抽屉**：点击任意基金，聚合实时详情与限购公告
+- **详情抽屉**：点击任意基金，查看可指导购买的完整信息
+  - **净值走势**：区间可切换（近1月/近3月/近6月/近1年/近3年），附区间涨幅与**最大回撤**
+  - **收益表现**：近1周到成立来的分周期收益率，对比**同类平均**、**沪深300**，并给出**同类排名**
+  - **规模变动**：季度净资产规模及环比
+  - **资产配置 / 持有人结构**：股/债/现金占净比、机构与个人持有比例
+  - **主要成分**：重仓股及增减持；联接基金显示底层 ETF
+  - 另有实时详情与申购相关公告
 - **场内折溢价**：85 只场内 QDII 的溢价率排行
 - **查询可分享**：筛选条件写入 URL hash，复制链接即可复现同一查询
 - 深色模式、响应式；`/` 聚焦搜索框，`Esc` 关闭抽屉
@@ -89,11 +95,11 @@ python3 src/qdii_web.py --host 0.0.0.0  # 局域网可访问
 ## 测试
 
 ```bash
-python3 tests/test_normalize.py                              # 17 项，归一化规则
+python3 tests/test_normalize.py                              # 24 项，归一化规则 + pingzhongdata 解析
 
 # 前端查询逻辑（需要服务在跑）
 curl -s http://127.0.0.1:8765/api/dataset > /tmp/dataset.json
-node tests/test_web_logic.mjs /tmp/dataset.json               # 31 项
+node tests/test_web_logic.mjs /tmp/dataset.json               # 63 项
 ```
 
 ---
@@ -134,6 +140,10 @@ $ python3 src/qdii_limit.py list --status 限大额 --max-limit 25 --sort limit-
 | `美汇`/`美钞` 是美元的简写变体 | 漏判为人民币份额 | 补充标记 |
 | 赎回状态是另一套枚举（`开放赎回` ≠ `开放申购`） | 赎回状态显示为空 | 独立 `RedeemStatus` 枚举 |
 | 场内 QDII ETF 溢价可达 **23%** | 场外限购时盲目转场内会多付两成成本 | 提供 `premium` 子命令 |
+| `pingzhongdata` 是 JS 文本（`var X = <json>;`）而非 JSON | 整体 `json.loads` 失败 | 按 `var` 逐块截取解析，非 JSON 块跳过 |
+| 净值时间戳是**北京时间零点** | 按 UTC 取日期会差一天 | 按 UTC+8 换算 |
+| 持仓接口的报告期 `Expansion` 在**响应顶层** | 从 `Datas` 里取不到报告期 | 在顶层读取 |
+| 联接基金 `fundStocks` 为空（只持有 ETF） | 「主要成分」空白 | 回退展示 `ETFCODE` 底层 ETF |
 | 旧估值接口 `fundgz.1234567.com.cn` 已 404 | 按老资料实现会全部失败 | 已标注弃用 |
 
 ---
