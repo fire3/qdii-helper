@@ -12,7 +12,7 @@ const DEFAULT_STATE = {
   currency: 'CNY',
   regions: [],
   themes: [],
-  sort: 'limit-asc',
+  sort: 'limit-desc',
 };
 
 let state = { ...DEFAULT_STATE };
@@ -84,7 +84,7 @@ function readHash() {
     currency: p.get('cur') || 'CNY',
     regions: p.get('rg') ? p.get('rg').split(',').filter(Boolean) : [],
     themes: p.get('th') ? p.get('th').split(',').filter(Boolean) : [],
-    sort: p.get('so') || 'limit-asc',
+    sort: p.get('so') || 'limit-desc',
   };
 }
 
@@ -96,7 +96,7 @@ function writeHash() {
   if (state.currency !== 'CNY') p.set('cur', state.currency);
   if (state.regions.length) p.set('rg', state.regions.join(','));
   if (state.themes.length) p.set('th', state.themes.join(','));
-  if (state.sort !== 'limit-asc') p.set('so', state.sort);
+  if (state.sort !== 'limit-desc') p.set('so', state.sort);
   const next = p.toString();
   history.replaceState(null, '', next ? '#' + next : location.pathname);
 }
