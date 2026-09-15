@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from qdii_limit import (  # noqa: E402
+from qdii_helper.qdii_limit import (  # noqa: E402
     Currency,
     PurchaseStatus,
     build_fund,

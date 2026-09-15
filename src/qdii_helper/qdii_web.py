@@ -5,8 +5,9 @@
 不自建第二套数据口径。
 
 仅依赖 Python 标准库：
-    python3 src/qdii_web.py            # 默认 http://127.0.0.1:8765
-    python3 src/qdii_web.py --port 9000 --host 0.0.0.0
+    qdii-web                           # 默认 http://127.0.0.1:8765
+    qdii-web --port 9000 --host 0.0.0.0
+    python -m qdii_helper              # 等价写法
 """
 
 from __future__ import annotations
@@ -24,12 +25,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from . import qdii_categories as cats
+from . import qdii_limit as ql
 
-import qdii_categories as cats          # noqa: E402
-import qdii_limit as ql                 # noqa: E402
-
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+WEB_DIR = Path(__file__).resolve().parent / "web"
 
 DISCLAIMER = "数据来自天天基金公开接口，仅供参考，实际限额以基金公司最新公告为准"
 
@@ -382,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.verbose = args.verbose            # type: ignore[attr-defined]
     print(f"QDII 限购查询 Web 工具已启动： http://{args.host}:{args.port}")
+    print(f"数据缓存目录：{ql.CACHE_DIR}")
     print("首次加载会拉取上游数据（约 4 MB），之后 30 分钟内走缓存。Ctrl+C 停止。")
     try:
         httpd.serve_forever()

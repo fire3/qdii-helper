@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -22,8 +23,28 @@ from enum import Enum
 from pathlib import Path
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
-CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
 CACHE_TTL = 30 * 60
+
+
+def default_cache_dir() -> Path:
+    """用户级缓存目录，避免写入安装目录（site-packages 通常只读）。
+
+    Linux/macOS 遵循 XDG / Apple 约定，Windows 用 %LOCALAPPDATA%。
+    可用环境变量 QDII_HELPER_CACHE_DIR 覆盖。
+    """
+    override = os.environ.get("QDII_HELPER_CACHE_DIR")
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches"
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return base / "qdii-helper"
+
+
+CACHE_DIR = default_cache_dir()
 
 # 「无限额」哨兵值实测有 9,999,999,999 / 1e10 / 1e11 等多种写法，
 # 而真实限额最高仅 50,000,000（5 千万），1e8 是安全的判定阈值。
@@ -160,7 +181,7 @@ def fetch_purchase_snapshot(use_cache: bool = True) -> tuple[list[list[str]], di
 
     返回 (rows, meta)。meta 含 record / pages / showday（showday[0] 为数据日期）。
     """
-    CACHE_DIR.mkdir(exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache = CACHE_DIR / "sgzt.json"
 
     if use_cache and cache.exists() and time.time() - cache.stat().st_mtime < CACHE_TTL:
@@ -660,7 +681,6 @@ def cmd_premium(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="qdii_limit",
         description="QDII 基金限购额度查询工具",
     )
     parser.add_argument("--no-cache", action="store_true", help="忽略本地缓存，强制刷新")

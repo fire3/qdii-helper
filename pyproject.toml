@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qdii-helper"
+description = "QDII 基金限购额度查询工具：命令行 + 本地 Web 界面"
+readme = "README.md"
+requires-python = ">=3.8"
+dynamic = ["version"]
+keywords = ["qdii", "fund", "etf", "eastmoney", "天天基金"]
+dependencies = []
+
+[project.scripts]
+qdii-web = "qdii_helper.qdii_web:main"
+qdii-limit = "qdii_helper.qdii_limit:main"
+
+[project.urls]
+Homepage = "https://github.com/fire3/qdii-helper"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+qdii_helper = ["web/*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "qdii_helper.__version__" }

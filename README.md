@@ -13,13 +13,50 @@ QDII 基金限购额度查询工具。
 
 | 路径 | 内容 |
 |---|---|
+| [`pyproject.toml`](pyproject.toml) | 打包配置 —— `pip install .` 后得到 `qdii-web` / `qdii-limit` 两个命令 |
 | [`docs/api.md`](docs/api.md) | **接口文档** —— 天天基金/东方财富限购相关接口的逆向调研结果，全部实测验证 |
 | [`docs/design.md`](docs/design.md) | **设计文档** —— 数据源选型、数据模型、归一化算法、归类设计、CLI/Web 设计、演进路线 |
-| [`src/qdii_limit.py`](src/qdii_limit.py) | P0：命令行工具（仅标准库） |
-| [`src/qdii_categories.py`](src/qdii_categories.py) | 归类规则（地区/市场 × 主题 两个维度） |
-| [`src/qdii_web.py`](src/qdii_web.py) | P1：Web 工具后端（仅标准库，复用上述两个模块） |
-| [`web/`](web/) | P1：零依赖前端（HTML + CSS + JS，无构建步骤） |
+| [`src/qdii_helper/qdii_limit.py`](src/qdii_helper/qdii_limit.py) | P0：命令行工具（仅标准库） |
+| [`src/qdii_helper/qdii_categories.py`](src/qdii_helper/qdii_categories.py) | 归类规则（地区/市场 × 主题 两个维度） |
+| [`src/qdii_helper/qdii_web.py`](src/qdii_helper/qdii_web.py) | P1：Web 工具后端（仅标准库，复用上述两个模块） |
+| [`src/qdii_helper/web/`](src/qdii_helper/web/) | P1：零依赖前端（HTML + CSS + JS，无构建步骤） |
 | [`tests/`](tests/) | 归一化规则 + 前端查询逻辑测试 |
+
+---
+
+## 安装
+
+```bash
+pip install .                                              # 在仓库根目录
+pip install git+https://github.com/fire3/qdii-helper.git    # 或直接装 GitHub 上的版本
+```
+
+装好后直接用一个命令启动 Web 工具：
+
+```bash
+qdii-web                    # http://127.0.0.1:8765
+qdii-web --port 9000        # 换端口
+qdii-web --host 0.0.0.0     # 局域网可访问
+```
+
+命令行工具同理（下文示例中的 `qdii-limit`）。
+
+不想安装时，两种都能直接跑：
+
+```bash
+PYTHONPATH=src python3 -m qdii_helper.qdii_web
+PYTHONPATH=src python3 -m qdii_helper.qdii_limit list
+```
+
+**数据缓存**在用户缓存目录，不在仓库或安装目录里：
+
+| 平台 | 路径 |
+|---|---|
+| Linux | `$XDG_CACHE_HOME/qdii-helper`（默认 `~/.cache/qdii-helper`） |
+| macOS | `~/Library/Caches/qdii-helper` |
+| Windows | `%LOCALAPPDATA%\qdii-helper` |
+
+可用环境变量 `QDII_HELPER_CACHE_DIR` 覆盖。删掉该目录即可强制重新拉取。
 
 ---
 
@@ -29,30 +66,30 @@ QDII 基金限购额度查询工具。
 
 ```bash
 # 可买的 QDII，额度从高到低
-python3 src/qdii_limit.py list
+qdii-limit list
 
 # 限大额且日限额 <= 25 元，按额度从紧到松
-python3 src/qdii_limit.py list --status 限大额 --max-limit 25 --sort limit-asc
+qdii-limit list --status 限大额 --max-limit 25 --sort limit-asc
 
 # 额度最紧的 20 只
-python3 src/qdii_limit.py top --n 20
+qdii-limit top --n 20
 
 # 单只基金详情 + 最近限购公告
-python3 src/qdii_limit.py show 270042
+qdii-limit show 270042
 
 # 场内 QDII 折溢价（评估"转战场内"的代价）
-python3 src/qdii_limit.py premium --n 30
+qdii-limit premium --n 30
 
 # 导出
-python3 src/qdii_limit.py list --status 全部 --format json
+qdii-limit list --status 全部 --format json
 ```
 
 ## 二、Web 工具
 
 ```bash
-python3 src/qdii_web.py                 # http://127.0.0.1:8765
-python3 src/qdii_web.py --port 9000     # 换端口
-python3 src/qdii_web.py --host 0.0.0.0  # 局域网可访问
+qdii-web                 # http://127.0.0.1:8765
+qdii-web --port 9000     # 换端口
+qdii-web --host 0.0.0.0  # 局域网可访问
 ```
 
 首次打开会拉取上游数据（约 4 MB），之后 30 分钟走缓存。
@@ -107,7 +144,7 @@ node tests/test_web_logic.mjs /tmp/dataset.json               # 63 项
 ## 输出示例
 
 ```
-$ python3 src/qdii_limit.py list --status 限大额 --max-limit 25 --sort limit-asc
+$ qdii-limit list --status 限大额 --max-limit 25 --sort limit-asc
 
   代码    基金简称                              类型              净值(日期)                日限额         起点  费率
   ───────────────────────────────────────────────────────────────────────────────────────────────────────────

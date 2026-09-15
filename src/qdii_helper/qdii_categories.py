@@ -114,11 +114,12 @@ def coverage(names: list[str]) -> dict:
 
 if __name__ == "__main__":
     import json
-    from pathlib import Path
 
-    cache = Path(__file__).resolve().parent.parent / ".cache" / "sgzt.json"
+    from .qdii_limit import CACHE_DIR
+
+    cache = CACHE_DIR / "sgzt.json"
     if not cache.exists():
-        raise SystemExit("请先运行 src/qdii_limit.py 生成缓存：python3 src/qdii_limit.py list")
+        raise SystemExit("请先生成缓存：qdii-limit list")
     cached = json.loads(cache.read_text(encoding="utf-8"))
     # 缓存有两种历史格式：早期是裸 rows 数组，现为 {"rows": [...], "meta": {...}}
     rows = cached if isinstance(cached, list) else cached["rows"]

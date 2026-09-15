@@ -276,8 +276,11 @@ def parse_currency(name: str) -> Currency:
 上游是**日频**数据（`showday` 只到日），因此：
 
 - 内存 / 磁盘缓存 TTL = **30 分钟**（远小于数据变化频率）
-- 缓存文件：`.cache/sgzt_{YYYYMMDD_HHMM}.json`
-- 单次全量 4.1 MB，落盘 JSON 约 3 MB，保留最近 2 份即可
+- 缓存文件：用户缓存目录下的 `qdii-helper/sgzt.json`
+  —— Linux `$XDG_CACHE_HOME`（默认 `~/.cache`）、macOS `~/Library/Caches`、
+  Windows `%LOCALAPPDATA%`，可用环境变量 `QDII_HELPER_CACHE_DIR` 覆盖。
+  不写安装目录：site-packages 通常是只读的
+- 单次全量 4.1 MB，落盘 JSON 约 3 MB
 
 **不建议更频繁**：一是数据本身日频，二是对非官方接口应保持克制。
 
@@ -289,25 +292,25 @@ def parse_currency(name: str) -> Currency:
 
 ```bash
 # 默认视图：可买的 QDII，可买优先 + 额度从高到低
-qdii_limit list
+qdii-limit list
 
 # 只看限大额，且筛选条件（金额单位：元）
-qdii_limit list --status 限大额 --min-limit 0 --max-limit 100 --sort limit-asc
+qdii-limit list --status 限大额 --min-limit 0 --max-limit 100 --sort limit-asc
 
 # 按指数主题过滤（对简称做子串匹配）
-qdii_limit list --keyword 纳斯达克 --currency cny
+qdii-limit list --keyword 纳斯达克 --currency cny
 
 # 额度最紧的 20 只
-qdii_limit top --n 20 --kind tight
+qdii-limit top --n 20 --kind tight
 
 # 单只基金详情（接口 A 行 + 接口 B 详情 + 接口 D 公告）
-qdii_limit show 270042
+qdii-limit show 270042
 
 # 场内 QDII 折溢价（接口 F），用于评估"场外买不到就转场内"的代价
-qdii_limit premium --n 30
+qdii-limit premium --n 30
 
 # 输出格式
-qdii_limit list --format table|csv|json
+qdii-limit list --format table|csv|json
 ```
 
 ### 6.1 参数表
@@ -329,7 +332,7 @@ qdii_limit list --format table|csv|json
 ### 6.2 输出示例（实测）
 
 ```
-$ qdii_limit list --status 限大额 --max-limit 25 --sort limit-asc
+$ qdii-limit list --status 限大额 --max-limit 25 --sort limit-asc
 
   代码    基金简称                              类型              净值(日期)             日限额   起点  费率
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -341,7 +344,7 @@ $ qdii_limit list --status 限大额 --max-limit 25 --sort limit-asc
 
   共 43 只（匹配 735 只 QDII） · 仅供参考，实际限额以基金公司最新公告为准
 
-$ qdii_limit show 270042
+$ qdii-limit show 270042
 
   广发纳斯达克100ETF联接人民币(QDII)A
   ──────────────────────────────────────────────────────────────────
@@ -359,7 +362,7 @@ $ qdii_limit show 270042
 
   仅供参考，实际限额以基金公司最新公告为准
 
-$ qdii_limit premium --n 5
+$ qdii-limit premium --n 5
 
   场内 QDII 折溢价（共 5 只）
 
@@ -387,8 +390,8 @@ $ qdii_limit premium --n 5
 
 | 阶段 | 形态 | 技术 | 状态 |
 |---|---|---|---|
-| **P0** | Python CLI | 仅标准库 `urllib` | ✅ 已实现（`src/qdii_limit.py`） |
-| **P1** | 本地 Web 工具 | 标准库 HTTP 服务 + 零依赖前端 | ✅ 已实现（`src/qdii_web.py` + `web/`） |
+| **P0** | Python CLI | 仅标准库 `urllib` | ✅ 已实现（`src/qdii_helper/qdii_limit.py`） |
+| **P1** | 本地 Web 工具 | 标准库 HTTP 服务 + 零依赖前端 | ✅ 已实现（`src/qdii_helper/qdii_web.py` + `src/qdii_helper/web/`） |
 | P2 | 静态化 + 定时落库 | GitHub Actions 每 30 min 拉接口 A → `data.json` | 未实现 |
 | P3 | 服务 + 告警 | SQLite 落库 + diff 检测 | 未实现 |
 
@@ -408,8 +411,9 @@ $ qdii_limit premium --n 5
 
 - 后端负责拉取 / 缓存 / 归一化 / 归类，前端只做渲染与交互
 - **归一化与归类逻辑 100% 复用 P0 的模块**，不产生第二套数据口径
-  （`qdii_web.py` 直接 `import qdii_limit`、`import qdii_categories`）
-- 前端仍是纯静态资源（`web/index.html` + `style.css` + `app.js`），无构建步骤
+  （`qdii_web.py` 直接 `from . import qdii_limit, qdii_categories`）
+- 前端仍是纯静态资源（`src/qdii_helper/web/` 下的 `index.html` + `style.css`
+  + `app.js`），无构建步骤，作为包数据随 wheel 一起分发
 
 ### 7.2 P2 仍是性价比拐点
 
@@ -443,7 +447,7 @@ P0/P1 都是无状态的，P2 才开始产生增量价值。
 
 ### 8.2 规则形式与优先级
 
-规则是**有序的正则表，第一个匹配生效**（`src/qdii_categories.py`）。
+规则是**有序的正则表，第一个匹配生效**（`src/qdii_helper/qdii_categories.py`）。
 顺序即优先级 —— 越具体的指数越靠前：
 
 ```
@@ -479,7 +483,7 @@ P0/P1 都是无状态的，P2 才开始产生增量价值。
 规则失效会随上游改名而静默发生，因此提供自检：
 
 ```bash
-python3 src/qdii_categories.py     # 打印当前分类分布
+python3 -m qdii_helper.qdii_categories     # 打印当前分类分布
 ```
 
 若某类数量骤降或兜底类异常膨胀，即说明规则需要更新。
@@ -511,12 +515,25 @@ python3 src/qdii_categories.py     # 打印当前分类分布
 
 ## 11. 参考实现
 
+安装（Python 3.8+，无第三方依赖）：
+
+```bash
+pip install .
+# 或直接装 GitHub 上的版本
+pip install git+https://github.com/fire3/qdii-helper.git
+```
+
+装好后得到两个命令：`qdii-web`（Web 工具）与 `qdii-limit`（命令行）。
+源码是 `src/` 布局的 `qdii_helper` 包，两个入口点定义在 `pyproject.toml`；
+前端静态资源靠 `package-data` 随 wheel 分发，没有构建步骤。
+数据缓存在用户缓存目录（§5.5），不写安装目录。
+
 | 模块 | 对应设计 | 说明 |
 |---|---|---|
-| `src/qdii_limit.py` | §5 归一化、§6 CLI | P0：`list` / `top` / `show` / `premium` 四个子命令 |
-| `src/qdii_categories.py` | §8 归类 | 两个维度的有序正则规则 + `coverage()` 自检 |
-| `src/qdii_web.py` | §7.1 | P1 后端：标准库 HTTP 服务，复用上述两个模块 |
-| `web/index.html` `web/style.css` `web/app.js` | §6 交互 | 零依赖前端，无构建步骤 |
+| `src/qdii_helper/qdii_limit.py` | §5 归一化、§6 CLI | P0：`list` / `top` / `show` / `premium` 四个子命令，暴露为 `qdii-limit` |
+| `src/qdii_helper/qdii_categories.py` | §8 归类 | 两个维度的有序正则规则 + `coverage()` 自检 |
+| `src/qdii_helper/qdii_web.py` | §7.1 | P1 后端：标准库 HTTP 服务，复用上述两个模块，暴露为 `qdii-web` |
+| `src/qdii_helper/web/index.html` `.css` `.js` | §6 交互 | 零依赖前端，无构建步骤，随包分发 |
 
 测试：
 
@@ -531,7 +548,7 @@ python3 src/qdii_categories.py     # 打印当前分类分布
 
 ## 12. Web 工具 API（P1）
 
-服务以 `python3 src/qdii_web.py [--host H] [--port P]` 启动，默认 `127.0.0.1:8765`。
+服务以 `qdii-web [--host H] [--port P]` 启动，默认 `127.0.0.1:8765`。
 
 | 路径 | 说明 |
 |---|---|
@@ -546,5 +563,5 @@ python3 src/qdii_categories.py     # 打印当前分类分布
   735 条记录对浏览器是小数据量，换来的是零延迟交互 —— 每次点筛选都发请求
   既慢又浪费上游配额。
 - 响应 >1 KB 且客户端支持时启用 gzip：数据集 **308 KB → 20 KB**。
-- 静态文件服务做目录逃逸校验（`resolve()` 后必须仍在 `web/` 内）。
+- 静态文件服务做目录逃逸校验（`resolve()` 后必须仍在包内 `web/` 目录内）。
 - 数据日期（`showday[0]`）随数据集返回，界面上固定展示，避免用户误用过期数据。

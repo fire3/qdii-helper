@@ -48,7 +48,7 @@ sandbox.globalThis = sandbox;
 
 /* 加载 app.js，并把内部符号暴露出来供断言使用。
    注意用 getter/setter：直接取值只会拿到加载瞬间的快照（dataset 尚为 null）。 */
-const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8')
+const source = readFileSync(new URL('../src/qdii_helper/web/app.js', import.meta.url), 'utf8')
   + `\n;globalThis.__t = {
        get state() { return state; }, set state(v) { state = v; },
        get dataset() { return dataset; }, set dataset(v) { dataset = v; },
