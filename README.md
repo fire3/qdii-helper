@@ -31,6 +31,16 @@ pip install .                                              # 在仓库根目录
 pip install git+https://github.com/fire3/qdii-helper.git    # 或直接装 GitHub 上的版本
 ```
 
+> 如果安装时报 `Could not find a version that satisfies the requirement setuptools>=61 (from versions: none)`，
+> 那多半是镜像拦了 pip 的 User-Agent，不是本仓库的问题（用 curl／浏览器访问同一个地址却是 200）。
+> 升级 pip 后 UA 会变，通常就能恢复：
+>
+> ```bash
+> python -m pip install -U pip                               # 先试这个
+> pip install . -i https://mirrors.aliyun.com/pypi/simple     # 或者临时换一个能用的镜像
+> pip install . --no-build-isolation                          # 或者复用本机已有的 setuptools（需 >= 61）
+> ```
+
 装好后直接用一个命令启动 Web 工具：
 
 ```bash
